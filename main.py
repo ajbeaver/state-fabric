@@ -1,5 +1,6 @@
 import argparse
 
+from modules.peers import initialize_peers
 from modules.accounts import initialize_accounts
 from modules.merkle import (
     commit_state,
@@ -57,6 +58,11 @@ def build_parser():
         help="Ethereum address to verify",
     )
 
+    commands.add_parser(
+        "peers",
+        help="Initialize peer devices from the current state",
+    )
+    
     return parser
 
 
@@ -106,6 +112,13 @@ def main():
                 f"Verification failed: {args.address}"
             )
 
+    elif args.command == "peers":
+        count = initialize_peers()
+    
+        print(
+            f"Initialized {count} peers "
+            "in data/peers/"
+        )
 
 if __name__ == "__main__":
     main()

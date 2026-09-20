@@ -1,0 +1,17 @@
+{
+  "address": "0xE4F1f4256756FBaD74d601EF9140cF893FeC6E80",
+  "proof": [
+    {
+      "side": "right",
+      "hash": "0x6b30ed3d64bf68534b54b61b4fb37a75e839ba0bc09c01cd2eb56f201be081af"
+    },
+    {
+      "side": "right",
+      "hash": "0x40db64e9542025d5b2180091ad07fbb110d7e8c67a353de680297d7db2088a33"
+    },
+    {
+      "side": "left",
+      "hash": "0x70df1ac8414fe96e69e8bb9664a5a68b5bd2755ace84547e59be586942252032"
+    }
+  ]
+}

@@ -1,44 +1,69 @@
 from pathlib import Path
 import shutil
 
-from modules.merkle import (
-    generate_proof,
-    load_account_dirs,
-)
+from eth_utils import keccak
+
+from modules.wallets import generate_wallets
 
 
-DEFAULT_ACCOUNTS_DIR = Path("data/accounts")
-DEFAULT_REFERENCE_DIR = Path("data/reference")
 DEFAULT_PEERS_DIR = Path("data/peers")
+DEFAULT_REFERENCE_DIR = Path("data/reference")
+DEFAULT_SEED = "state-fabric-v1"
+
+WEI_PER_ETH = 10**18
+MAX_BALANCE_ETH = 100
+MAX_NONCE = 20
+
+
+def derive_balance(seed: str, index: int) -> int:
+    material = f"{seed}:balance:{index}".encode("utf-8")
+    digest = keccak(material)
+
+    return int.from_bytes(
+        digest,
+        byteorder="big",
+    ) % (MAX_BALANCE_ETH * WEI_PER_ETH)
+
+
+def derive_nonce(seed: str, index: int) -> int:
+    material = f"{seed}:nonce:{index}".encode("utf-8")
+    digest = keccak(material)
+
+    return int.from_bytes(
+        digest,
+        byteorder="big",
+    ) % (MAX_NONCE + 1)
 
 
 def initialize_peers(
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
-    reference_dir: Path = DEFAULT_REFERENCE_DIR,
+    count: int,
+    seed: str = DEFAULT_SEED,
     peers_dir: Path = DEFAULT_PEERS_DIR,
+    reference_dir: Path = DEFAULT_REFERENCE_DIR,
 ) -> int:
-    state_root = reference_dir / "state_root"
-
-    if not state_root.exists():
+    if count < 1:
         raise ValueError(
-            "Canonical state root does not exist. "
-            "Run commit before initializing peers."
+            "Peer count must be at least 1"
         )
-
-    account_dirs = load_account_dirs(accounts_dir)
 
     if peers_dir.exists():
         shutil.rmtree(peers_dir)
+
+    if reference_dir.exists():
+        shutil.rmtree(reference_dir)
 
     peers_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    for account_dir in account_dirs:
-        address = account_dir.name
+    wallets = generate_wallets(
+        count,
+        seed,
+    )
 
-        peer_dir = peers_dir / address
+    for index, wallet in enumerate(wallets):
+        peer_dir = peers_dir / wallet.address
         self_cache = peer_dir / "cache" / "self"
         data_dir = peer_dir / "data"
 
@@ -52,31 +77,24 @@ def initialize_peers(
             exist_ok=True,
         )
 
-        shutil.copy2(
-            account_dir / "balance",
-            self_cache / "balance",
+        balance = derive_balance(
+            seed,
+            index,
         )
 
-        shutil.copy2(
-            account_dir / "nonce",
-            self_cache / "nonce",
+        nonce = derive_nonce(
+            seed,
+            index,
         )
 
-        generate_proof(
-            address,
-            accounts_dir=accounts_dir,
-            reference_dir=reference_dir,
+        (self_cache / "balance").write_text(
+            f"{balance}\n",
+            encoding="utf-8",
         )
 
-        proof_source = (
-            reference_dir
-            / "proofs"
-            / f"{address}.json"
+        (self_cache / "nonce").write_text(
+            f"{nonce}\n",
+            encoding="utf-8",
         )
 
-        shutil.copy2(
-            proof_source,
-            self_cache / "proof.json",
-        )
-
-    return len(account_dirs)
+    return len(wallets)

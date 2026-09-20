@@ -4,31 +4,65 @@ import json
 from eth_utils import keccak
 
 
-DEFAULT_ACCOUNTS_DIR = Path("data/accounts")
+DEFAULT_PEERS_DIR = Path("data/peers")
 DEFAULT_REFERENCE_DIR = Path("data/reference")
 
 
-def serialize_account(account_dir: Path) -> bytes:
-    address = (account_dir / "address").read_text(
-        encoding="utf-8"
-    ).strip()
+def get_self_cache(peer_dir: Path) -> Path:
+    return peer_dir / "cache" / "self"
+
+
+def load_peer_dirs(
+    peers_dir: Path = DEFAULT_PEERS_DIR,
+) -> list[Path]:
+    if not peers_dir.exists():
+        raise ValueError(
+            f"Peers directory does not exist: {peers_dir}"
+        )
+
+    peer_dirs = sorted(
+        (
+            path
+            for path in peers_dir.iterdir()
+            if path.is_dir()
+        ),
+        key=lambda path: path.name.lower(),
+    )
+
+    if not peer_dirs:
+        raise ValueError("No peers found")
+
+    return peer_dirs
+
+
+def serialize_peer_state(peer_dir: Path) -> bytes:
+    address = peer_dir.name
+    self_cache = get_self_cache(peer_dir)
+
+    balance_path = self_cache / "balance"
+    nonce_path = self_cache / "nonce"
+
+    if not balance_path.exists():
+        raise ValueError(
+            f"Missing balance for peer: {address}"
+        )
+
+    if not nonce_path.exists():
+        raise ValueError(
+            f"Missing nonce for peer: {address}"
+        )
 
     balance = int(
-        (account_dir / "balance").read_text(
+        balance_path.read_text(
             encoding="utf-8"
         ).strip()
     )
 
     nonce = int(
-        (account_dir / "nonce").read_text(
+        nonce_path.read_text(
             encoding="utf-8"
         ).strip()
     )
-
-    if address.lower() != account_dir.name.lower():
-        raise ValueError(
-            f"Address mismatch in {account_dir}"
-        )
 
     canonical = (
         f"address={address.lower()}\n"
@@ -39,137 +73,117 @@ def serialize_account(account_dir: Path) -> bytes:
     return canonical.encode("utf-8")
 
 
-def hash_account(account_dir: Path) -> bytes:
-    account_bytes = serialize_account(account_dir)
-
-    return keccak(account_bytes)
-
-
-def load_account_dirs(
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
-) -> list[Path]:
-    if not accounts_dir.exists():
-        raise ValueError(
-            f"Accounts directory does not exist: {accounts_dir}"
-        )
-
-    account_dirs = sorted(
-        (
-            path
-            for path in accounts_dir.iterdir()
-            if path.is_dir()
-        ),
-        key=lambda path: path.name.lower(),
+def hash_peer_state(peer_dir: Path) -> bytes:
+    state_bytes = serialize_peer_state(
+        peer_dir
     )
 
-    if not account_dirs:
-        raise ValueError("No accounts found")
-
-    return account_dirs
+    return keccak(state_bytes)
 
 
 def load_leaf_hashes(
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
+    peers_dir: Path = DEFAULT_PEERS_DIR,
 ) -> list[bytes]:
-    account_dirs = load_account_dirs(accounts_dir)
+    peer_dirs = load_peer_dirs(
+        peers_dir
+    )
 
     return [
-        hash_account(account_dir)
-        for account_dir in account_dirs
+        hash_peer_state(peer_dir)
+        for peer_dir in peer_dirs
     ]
 
 
-def build_merkle_root(leaves: list[bytes]) -> bytes:
+def build_merkle_levels(
+    leaves: list[bytes],
+) -> list[list[bytes]]:
     if not leaves:
-        raise ValueError("Cannot build tree without leaves")
+        raise ValueError(
+            "Cannot build tree without leaves"
+        )
 
-    level = list(leaves)
+    levels = [
+        list(leaves)
+    ]
 
-    while len(level) > 1:
-        if len(level) % 2 != 0:
-            level.append(level[-1])
+    current_level = list(leaves)
+
+    while len(current_level) > 1:
+        working_level = list(
+            current_level
+        )
+
+        if len(working_level) % 2 != 0:
+            working_level.append(
+                working_level[-1]
+            )
 
         next_level = []
 
-        for index in range(0, len(level), 2):
-            left = level[index]
-            right = level[index + 1]
+        for index in range(
+            0,
+            len(working_level),
+            2,
+        ):
+            left = working_level[index]
+            right = working_level[index + 1]
 
-            parent = keccak(left + right)
-            next_level.append(parent)
+            parent = keccak(
+                left + right
+            )
 
-        level = next_level
+            next_level.append(
+                parent
+            )
 
-    return level[0]
-
-
-def commit_state(
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
-    reference_dir: Path = DEFAULT_REFERENCE_DIR,
-) -> bytes:
-    leaves = load_leaf_hashes(accounts_dir)
-    root = build_merkle_root(leaves)
-
-    reference_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    root_hex = f"0x{root.hex()}"
-
-    (reference_dir / "state_root").write_text(
-        f"{root_hex}\n",
-        encoding="utf-8",
-    )
-
-    return root
-
-
-def find_account_dir(
-    address: str,
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
-) -> Path:
-    account_dirs = load_account_dirs(accounts_dir)
-
-    for account_dir in account_dirs:
-        if account_dir.name.lower() == address.lower():
-            return account_dir
-
-    raise ValueError(
-        f"Account not found: {address}"
-    )
-
-
-def generate_proof(
-    address: str,
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
-    reference_dir: Path = DEFAULT_REFERENCE_DIR,
-) -> list[dict[str, str]]:
-    account_dirs = load_account_dirs(accounts_dir)
-
-    target_index = None
-
-    for index, account_dir in enumerate(account_dirs):
-        if account_dir.name.lower() == address.lower():
-            target_index = index
-            break
-
-    if target_index is None:
-        raise ValueError(
-            f"Account not found: {address}"
+        levels.append(
+            next_level
         )
 
-    level = [
-        hash_account(account_dir)
-        for account_dir in account_dirs
-    ]
+        current_level = next_level
+
+    return levels
+
+
+def build_merkle_root(
+    leaves: list[bytes],
+) -> bytes:
+    levels = build_merkle_levels(
+        leaves
+    )
+
+    return levels[-1][0]
+
+
+def build_proof(
+    levels: list[list[bytes]],
+    leaf_index: int,
+) -> list[dict[str, str]]:
+    if not levels:
+        raise ValueError(
+            "Merkle tree has no levels"
+        )
+
+    if leaf_index < 0:
+        raise ValueError(
+            "Leaf index cannot be negative"
+        )
+
+    if leaf_index >= len(levels[0]):
+        raise ValueError(
+            "Leaf index is outside the tree"
+        )
 
     proof = []
-    index = target_index
+    index = leaf_index
 
-    while len(level) > 1:
-        if len(level) % 2 != 0:
-            level.append(level[-1])
+    for level in levels[:-1]:
+        working_level = list(level)
+
+        if len(working_level) % 2 != 0:
+            working_level.append(
+                working_level[-1]
+            )
 
         if index % 2 == 0:
             sibling_index = index + 1
@@ -178,42 +192,40 @@ def generate_proof(
             sibling_index = index - 1
             side = "left"
 
-        sibling_hash = level[sibling_index]
+        sibling_hash = (
+            working_level[sibling_index]
+        )
 
         proof.append(
             {
                 "side": side,
-                "hash": f"0x{sibling_hash.hex()}",
+                "hash": (
+                    f"0x{sibling_hash.hex()}"
+                ),
             }
         )
 
-        next_level = []
-
-        for pair_index in range(0, len(level), 2):
-            left = level[pair_index]
-            right = level[pair_index + 1]
-
-            parent = keccak(left + right)
-            next_level.append(parent)
-
-        level = next_level
         index //= 2
 
-    proofs_dir = reference_dir / "proofs"
+    return proof
 
-    proofs_dir.mkdir(
-        parents=True,
-        exist_ok=True,
+
+def write_peer_proof(
+    peer_dir: Path,
+    proof: list[dict[str, str]],
+) -> None:
+    self_cache = get_self_cache(
+        peer_dir
     )
 
-    canonical_address = account_dirs[target_index].name
-
     proof_data = {
-        "address": canonical_address,
+        "address": peer_dir.name,
         "proof": proof,
     }
 
-    proof_path = proofs_dir / f"{canonical_address}.json"
+    proof_path = (
+        self_cache / "proof.json"
+    )
 
     proof_path.write_text(
         json.dumps(
@@ -224,54 +236,69 @@ def generate_proof(
         encoding="utf-8",
     )
 
-    return proof
 
-
-def load_proof(
-    address: str,
+def commit_state(
+    peers_dir: Path = DEFAULT_PEERS_DIR,
     reference_dir: Path = DEFAULT_REFERENCE_DIR,
-) -> list[dict[str, str]]:
-    proofs_dir = reference_dir / "proofs"
-
-    if not proofs_dir.exists():
-        raise ValueError(
-            "Proof directory does not exist"
-        )
-
-    proof_path = None
-
-    for candidate in proofs_dir.glob("*.json"):
-        if candidate.stem.lower() == address.lower():
-            proof_path = candidate
-            break
-
-    if proof_path is None:
-        raise ValueError(
-            f"Proof not found: {address}"
-        )
-
-    proof_data = json.loads(
-        proof_path.read_text(
-            encoding="utf-8"
-        )
+) -> bytes:
+    peer_dirs = load_peer_dirs(
+        peers_dir
     )
 
-    if proof_data["address"].lower() != address.lower():
-        raise ValueError(
-            "Proof address does not match requested address"
+    leaves = [
+        hash_peer_state(peer_dir)
+        for peer_dir in peer_dirs
+    ]
+
+    levels = build_merkle_levels(
+        leaves
+    )
+
+    root = levels[-1][0]
+
+    reference_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    root_hex = (
+        f"0x{root.hex()}"
+    )
+
+    (
+        reference_dir / "state_root"
+    ).write_text(
+        f"{root_hex}\n",
+        encoding="utf-8",
+    )
+
+    for index, peer_dir in enumerate(
+        peer_dirs
+    ):
+        proof = build_proof(
+            levels,
+            index,
         )
 
-    return proof_data["proof"]
+        write_peer_proof(
+            peer_dir,
+            proof,
+        )
+
+    return root
 
 
 def load_state_root(
     reference_dir: Path = DEFAULT_REFERENCE_DIR,
 ) -> bytes:
-    root_path = reference_dir / "state_root"
+    root_path = (
+        reference_dir / "state_root"
+    )
 
     if not root_path.exists():
         raise ValueError(
-            "State root does not exist"
+            "State root does not exist. "
+            "Run commit first."
         )
 
     root_hex = root_path.read_text(
@@ -281,7 +308,9 @@ def load_state_root(
     if root_hex.startswith("0x"):
         root_hex = root_hex[2:]
 
-    root = bytes.fromhex(root_hex)
+    root = bytes.fromhex(
+        root_hex
+    )
 
     if len(root) != 32:
         raise ValueError(
@@ -291,16 +320,78 @@ def load_state_root(
     return root
 
 
+def find_peer_dir(
+    address: str,
+    peers_dir: Path = DEFAULT_PEERS_DIR,
+) -> Path:
+    peer_dirs = load_peer_dirs(
+        peers_dir
+    )
+
+    for peer_dir in peer_dirs:
+        if (
+            peer_dir.name.lower()
+            == address.lower()
+        ):
+            return peer_dir
+
+    raise ValueError(
+        f"Peer not found: {address}"
+    )
+
+
+def load_peer_proof(
+    peer_dir: Path,
+) -> list[dict[str, str]]:
+    proof_path = (
+        get_self_cache(peer_dir)
+        / "proof.json"
+    )
+
+    if not proof_path.exists():
+        raise ValueError(
+            f"Proof does not exist for "
+            f"{peer_dir.name}. "
+            "Run commit first."
+        )
+
+    proof_data = json.loads(
+        proof_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    proof_address = proof_data.get(
+        "address"
+    )
+
+    if (
+        proof_address is None
+        or proof_address.lower()
+        != peer_dir.name.lower()
+    ):
+        raise ValueError(
+            "Proof address does not "
+            "match peer address"
+        )
+
+    return proof_data["proof"]
+
+
 def verify_proof(
-    account_dir: Path,
+    peer_dir: Path,
     proof: list[dict[str, str]],
     expected_root: bytes,
 ) -> bool:
-    current_hash = hash_account(account_dir)
+    current_hash = hash_peer_state(
+        peer_dir
+    )
 
     for proof_item in proof:
         side = proof_item["side"]
-        sibling_hex = proof_item["hash"]
+        sibling_hex = (
+            proof_item["hash"]
+        )
 
         if sibling_hex.startswith("0x"):
             sibling_hex = sibling_hex[2:]
@@ -311,17 +402,20 @@ def verify_proof(
 
         if len(sibling_hash) != 32:
             raise ValueError(
-                "Merkle proof hash must be 32 bytes"
+                "Merkle proof hash "
+                "must be 32 bytes"
             )
 
         if side == "left":
             current_hash = keccak(
-                sibling_hash + current_hash
+                sibling_hash
+                + current_hash
             )
 
         elif side == "right":
             current_hash = keccak(
-                current_hash + sibling_hash
+                current_hash
+                + sibling_hash
             )
 
         else:
@@ -329,30 +423,32 @@ def verify_proof(
                 f"Invalid proof side: {side}"
             )
 
-    return current_hash == expected_root
-
-
-def verify_account(
-    address: str,
-    accounts_dir: Path = DEFAULT_ACCOUNTS_DIR,
-    reference_dir: Path = DEFAULT_REFERENCE_DIR,
-) -> bool:
-    account_dir = find_account_dir(
-        address,
-        accounts_dir,
+    return (
+        current_hash
+        == expected_root
     )
 
-    proof = load_proof(
+
+def verify_peer(
+    address: str,
+    peers_dir: Path = DEFAULT_PEERS_DIR,
+    reference_dir: Path = DEFAULT_REFERENCE_DIR,
+) -> bool:
+    peer_dir = find_peer_dir(
         address,
-        reference_dir,
+        peers_dir,
+    )
+
+    proof = load_peer_proof(
+        peer_dir
     )
 
     state_root = load_state_root(
-        reference_dir,
+        reference_dir
     )
 
     return verify_proof(
-        account_dir,
+        peer_dir,
         proof,
         state_root,
     )

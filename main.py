@@ -1,11 +1,9 @@
 import argparse
 
 from modules.peers import initialize_peers
-from modules.accounts import initialize_accounts
 from modules.merkle import (
     commit_state,
-    generate_proof,
-    verify_account,
+    verify_peer,
 )
 
 
@@ -21,48 +19,32 @@ def build_parser():
 
     init_parser = commands.add_parser(
         "init",
-        help="Initialize account state",
+        help="Initialize simulated peer devices",
     )
 
     init_parser.add_argument(
-        "--accounts",
+        "--peers",
         type=int,
         default=10,
-        help="Number of accounts to generate",
+        help="Number of peers to generate",
     )
 
     commands.add_parser(
         "commit",
-        help="Calculate the canonical state root",
-    )
-
-    prove_parser = commands.add_parser(
-        "prove",
-        help="Generate a Merkle proof for an account",
-    )
-
-    prove_parser.add_argument(
-        "--address",
-        required=True,
-        help="Ethereum address to generate a proof for",
+        help="Commit peer state and generate proofs",
     )
 
     verify_parser = commands.add_parser(
         "verify",
-        help="Verify an account against the canonical state root",
+        help="Verify a peer's cached state against the state root",
     )
 
     verify_parser.add_argument(
         "--address",
         required=True,
-        help="Ethereum address to verify",
+        help="Ethereum address of the peer to verify",
     )
 
-    commands.add_parser(
-        "peers",
-        help="Initialize peer devices from the current state",
-    )
-    
     return parser
 
 
@@ -71,11 +53,13 @@ def main():
     args = parser.parse_args()
 
     if args.command == "init":
-        initialize_accounts(args.accounts)
+        count = initialize_peers(
+            args.peers
+        )
 
         print(
-            f"Initialized {args.accounts} accounts "
-            "in data/accounts/"
+            f"Initialized {count} peers "
+            "in data/peers/"
         )
 
     elif args.command == "commit":
@@ -85,21 +69,12 @@ def main():
             f"State root: 0x{root.hex()}"
         )
 
-    elif args.command == "prove":
-        proof = generate_proof(
-            args.address
-        )
-
         print(
-            f"Generated proof for {args.address}"
-        )
-
-        print(
-            f"Proof contains {len(proof)} sibling hashes"
+            "Generated proofs for all peers"
         )
 
     elif args.command == "verify":
-        valid = verify_account(
+        valid = verify_peer(
             args.address
         )
 
@@ -109,16 +84,10 @@ def main():
             )
         else:
             print(
-                f"Verification failed: {args.address}"
+                f"Verification failed: "
+                f"{args.address}"
             )
 
-    elif args.command == "peers":
-        count = initialize_peers()
-    
-        print(
-            f"Initialized {count} peers "
-            "in data/peers/"
-        )
 
 if __name__ == "__main__":
     main()

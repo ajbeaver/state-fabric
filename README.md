@@ -1,25 +1,27 @@
 # State Fabric
 
-State Fabric is a research project exploring whether authenticated Ethereum-like state can be distributed across unreliable peers, reconstructed on demand, and verified without requiring every participant to store the full state.
+State Fabric is a research project exploring whether authenticated Ethereum-like state can be distributed across unreliable peers, reconstructed on demand, repaired after peer loss, and independently verified without requiring every participant to store the full state.
 
 The core question is:
 
-> Can canonical state be fragmented across many devices, reconstructed from only a subset of those fragments, and still be independently verified against a trusted state root?
+> Can canonical state survive as a distributed, self-repairing set of fragments while remaining verifiable against a trusted state root?
 
-This is currently a local Python simulator. It does not modify Ethereum or participate in consensus.
+State Fabric is currently a local Python simulator. It does not modify Ethereum or participate in consensus.
 
-## Current Experiment
+## Phase 1 — Distributed Static State
+
+Phase 1 models immutable authenticated state.
 
 Each simulated peer has:
 
 - an Ethereum address
-- a small amount of local state
-- a storage capacity
-- a local data directory for future fragment custody
+- local state
+- volunteered storage capacity
+- a local data directory for fragment custody
 
-State is committed into a Merkle tree and verified against a shared state root.
+Peer state is committed into a Merkle tree and verified against a shared trusted state root.
 
-Before distribution, peer state is packed into a deterministic binary object containing:
+Before distribution, state is packed into a deterministic binary object containing:
 
 ```text
 address
@@ -29,7 +31,9 @@ state root
 Merkle proof
 ```
 
-That object is content-addressed with Keccak-256.
+The object is content-addressed with Keccak-256 and encoded using a 2-of-5 erasure scheme.
+
+Any two valid fragments can reconstruct the original object.
 
 ## What Works
 
@@ -38,44 +42,84 @@ State Fabric currently supports:
 ```text
 ✓ deterministic Ethereum-address peers
 ✓ Merkle state commitments
-✓ independent state verification
+✓ canonical state verification
 ✓ deterministic state packages
-✓ plain striping
 ✓ fragment integrity hashes
 ✓ 2-of-5 erasure coding
-✓ reconstruction from any 2 fragments
-✓ verification after reconstruction
+✓ peer storage capacity enforcement
+✓ fragment custody across independent peers
+✓ replicated custody metadata
+✓ publisher-independent reconstruction
+✓ expiring custody claims
+✓ independent custody renewal
+✓ deterministic repair executor selection
+✓ missing-fragment regeneration
+✓ fragment reassignment after peer loss
+✓ recovery after the original publisher disappears
+✓ pytest coverage for Phase 1 failure behavior
 ```
 
-The current recovery test is:
+The Phase 1 lifecycle now looks like:
 
 ```text
-state package
-     ↓
-5 encoded fragments
-     ↓
-destroy 3
-     ↓
-reconstruct from 2
-     ↓
-verify object hash
-     ↓
-verify Merkle proof
-     ↓
-canonical state recovered
+publisher creates authenticated state
+        ↓
+object encoded into 5 fragments
+        ↓
+fragments distributed to independent custodians
+        ↓
+custody metadata replicated
+        ↓
+publisher disappears
+        ↓
+custodian disappears or claim expires
+        ↓
+surviving fragments reconstruct the object
+        ↓
+missing fragment regenerated
+        ↓
+new custodian accepts fragment
+        ↓
+redundancy returns to 5 fragments
+        ↓
+state remains independently verifiable
 ```
 
-With only one fragment remaining, reconstruction fails as expected.
+The publisher is required to create and initially distribute the object, but is not required for later reconstruction, custody renewal, or fragment repair.
+
+## Trust Model
+
+State Fabric separates three concerns:
+
+```text
+trusted state root
+    ↓
+determines canonical truth
+
+object and fragment hashes
+    ↓
+determine integrity
+
+custody metadata
+    ↓
+describes where fragments are currently available
+```
+
+Custody metadata is not treated as canonical state.
+
+A fragment only counts toward network availability while its custody claim is active and unexpired.
+
+Expired fragments are treated as unavailable and may be regenerated from surviving fragments.
 
 ## CLI
 
-Initialize five peers:
+Initialize peers:
 
 ```bash
-python3 main.py init --peers 5
+python3 main.py init --peers 7
 ```
 
-Commit the current state:
+Commit state:
 
 ```bash
 python3 main.py commit
@@ -89,57 +133,56 @@ python3 main.py offer \
   --encoding erasure
 ```
 
-Reconstruct it:
+Request fragment custody:
 
 ```bash
-python3 main.py reconstruct \
-  --address 0xPEER_ADDRESS
+python3 main.py request-custody \
+  --publisher 0xPUBLISHER \
+  --custodian 0xCUSTODIAN \
+  --object-id 0xOBJECT_ID
 ```
 
-Delete fragments for failure testing:
+Reconstruct from the distributed custody view:
 
 ```bash
-python3 main.py drop-fragment \
-  --address 0xPEER_ADDRESS \
-  --index 2
+python3 main.py reconstruct-network \
+  --object-id 0xOBJECT_ID \
+  --peer 0xCUSTODIAN
 ```
 
-Plain striping is also available as a control:
+Renew an active custody claim:
 
 ```bash
-python3 main.py offer \
-  --address 0xPEER_ADDRESS \
-  --encoding stripe \
-  --fragments 4
+python3 main.py renew-custody \
+  --object-id 0xOBJECT_ID \
+  --peer 0xCUSTODIAN
 ```
 
-## Next Milestone
+Repair a missing fragment:
 
-The five fragments are currently created locally by the publishing peer.
-
-The next step is to distribute them into independent peer `data/` directories, enforce capacity limits, remove the publisher, and prove that surviving peers alone can reconstruct and verify the state.
-
-The target test is:
-
-```text
-publisher creates state
-        ↓
-fragments distributed to peers
-        ↓
-publisher disappears
-        ↓
-several storage peers disappear
-        ↓
-threshold fragments survive
-        ↓
-state reconstructs and verifies
+```bash
+python3 main.py repair-network \
+  --object-id 0xOBJECT_ID \
+  --peer 0xREPAIR_EXECUTOR \
+  --new-custodian 0xNEW_CUSTODIAN
 ```
+
+## Tests
+
+Phase 1 behavior is covered with pytest.
+
+```bash
+python3 -m pytest -q
+```
+
+The suite covers healthy reconstruction, publisher loss, missing peers, corrupt fragments, missing fragments, expired custody, capacity exhaustion, recovery-threshold failure, repair executor enforcement, former-custodian re-entry, and successful redundancy restoration.
 
 ## Research Path
 
 ```text
 Phase 1
 Distributed static state
+✓ complete
 
 Phase 2
 Dynamic state and versioning
@@ -151,7 +194,7 @@ Phase 4
 Public Ethereum testnet
 ```
 
-The project is intentionally staying below the networking and consensus layers until the storage model proves useful.
+Phase 2 will ask whether the same storage model remains useful when canonical state changes over time and old fragments must be distinguished from current state.
 
 ## Repository
 
@@ -162,8 +205,10 @@ state-fabric/
 │   ├── wallets.py
 │   ├── peers.py
 │   ├── merkle.py
-│   └── storage.py
+│   ├── storage.py
+│   └── custody.py
+├── tests/
 └── README.md
 ```
 
-`data/` is generated runtime state and should not be tracked in Git.
+`data/` contains generated runtime state and is not tracked in Git.

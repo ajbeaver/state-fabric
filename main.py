@@ -1,7 +1,10 @@
 import argparse
 from pathlib import Path
 
-from modules.custody import request_custody
+from modules.custody import (
+    request_custody,
+    reconstruct_from_custody,
+)
 from modules.peers import initialize_peers
 from modules.merkle import (
     commit_state,
@@ -143,6 +146,22 @@ def build_parser():
     drop_parser.add_argument(
         "--object-id",
         help="Specific object ID containing the fragment",
+    )
+
+    custody_reconstruct_parser = commands.add_parser(
+        "reconstruct-custody",
+        help="Reconstruct an object from leased custodian fragments",
+    )
+    
+    custody_reconstruct_parser.add_argument(
+        "--publisher",
+        required=True,
+        help="Address of the peer that published the object",
+    )
+    
+    custody_reconstruct_parser.add_argument(
+        "--object-id",
+        help="Specific object ID to reconstruct",
     )
 
     return parser
@@ -385,6 +404,43 @@ def main():
             f"{get_object_id(package)}"
         )
 
+        print(
+            "Canonical verification: passed"
+        )
+
+    elif args.command == "reconstruct-custody":
+        package = reconstruct_from_custody(
+            publisher_address=(
+                args.publisher
+            ),
+            object_id=(
+                args.object_id
+            ),
+        )
+    
+        parsed = parse_state_package(
+            package
+        )
+    
+        print(
+            f"Reconstructed: "
+            f"{parsed['address']}"
+        )
+    
+        print(
+            f"Size: "
+            f"{len(package)} bytes"
+        )
+    
+        print(
+            f"Object ID: "
+            f"{get_object_id(package)}"
+        )
+    
+        print(
+            "Source: custodian network"
+        )
+    
         print(
             "Canonical verification: passed"
         )

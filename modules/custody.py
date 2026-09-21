@@ -8,8 +8,13 @@ from eth_utils import keccak
 
 from modules.merkle import find_peer_dir
 from modules.peers import can_accept
-from modules.storage import load_manifest
-
+from modules.storage import (
+    erasure_decode_2_of_5,
+    get_object_id,
+    load_manifest,
+    parse_state_package,
+    verify_state_package,
+)
 
 DEFAULT_PEERS_DIR = Path("data/peers")
 
@@ -699,3 +704,134 @@ def request_custody(
         ),
         "lease": lease,
     }
+
+
+def reconstruct_from_custody(
+    publisher_address: str,
+    object_id: str | None = None,
+    peers_dir: Path = DEFAULT_PEERS_DIR,
+) -> bytes:
+    publisher_dir = find_peer_dir(
+        publisher_address,
+        peers_dir,
+    )
+
+    offer_dir = find_offer_dir(
+        publisher_dir,
+        object_id,
+    )
+
+    expire_leases(
+        offer_dir
+    )
+
+    manifest = load_manifest(
+        offer_dir
+    )
+
+    leases = load_leases(
+        offer_dir
+    )
+
+    encoding = manifest[
+        "encoding"
+    ]
+
+    if encoding["type"] != "reed-solomon":
+        raise ValueError(
+            "Custody reconstruction currently "
+            "supports erasure-coded offers only"
+        )
+
+    required = encoding[
+        "required_fragments"
+    ]
+
+    valid_fragments = []
+
+    for fragment_key, lease in sorted(
+        leases.items(),
+        key=lambda item: int(item[0]),
+    ):
+        if lease["status"] != "leased":
+            continue
+
+        fragment_index = int(
+            fragment_key
+        )
+
+        fragment = get_manifest_fragment(
+            manifest,
+            fragment_index,
+        )
+
+        custodian_dir = find_peer_dir(
+            lease["custodian"],
+            peers_dir,
+        )
+
+        fragment_path = (
+            custodian_dir
+            / "data"
+            / manifest["object_id"]
+            / fragment["filename"]
+        )
+
+        if not fragment_path.exists():
+            continue
+
+        fragment_bytes = (
+            fragment_path.read_bytes()
+        )
+
+        if len(fragment_bytes) != fragment["size"]:
+            continue
+
+        fragment_hash = (
+            f"0x{keccak(fragment_bytes).hex()}"
+        )
+
+        if fragment_hash != fragment["hash"]:
+            continue
+
+        valid_fragments.append(
+            (
+                fragment["coefficient"],
+                fragment_bytes,
+            )
+        )
+
+        if len(valid_fragments) >= required:
+            break
+
+    if len(valid_fragments) < required:
+        raise ValueError(
+            f"Not enough valid custody fragments: "
+            f"{len(valid_fragments)} available, "
+            f"{required} required"
+        )
+
+    package = erasure_decode_2_of_5(
+        valid_fragments,
+        manifest["original_size"],
+    )
+
+    if len(package) != manifest["original_size"]:
+        raise ValueError(
+            "Reconstructed object size mismatch"
+        )
+
+    if get_object_id(package) != manifest["object_id"]:
+        raise ValueError(
+            "Reconstructed object hash mismatch"
+        )
+
+    if not verify_state_package(
+        package
+    ):
+        raise ValueError(
+            "Reconstructed state failed "
+            "canonical verification"
+        )
+
+    return package

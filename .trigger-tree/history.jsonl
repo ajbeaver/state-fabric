@@ -1,0 +1,5 @@
+{"t": "session", "ts": "2026-09-21T04:03:56Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "source": "startup", "git_head": "24e48eeb04a1f732b2f036d6c9af775195d14555", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-21T04:03:56Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "client": "codex", "prompt_hash": "fbdf8541b2", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-21T04:05:14Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-21T04:14:10Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "client": "codex", "prompt_hash": "a1596d7ffa", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-21T04:15:57Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}

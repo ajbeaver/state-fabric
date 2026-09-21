@@ -4,6 +4,7 @@ from pathlib import Path
 from modules.custody import (
     request_custody,
     reconstruct_from_custody,
+    reconstruct_from_network,
 )
 from modules.peers import initialize_peers
 from modules.merkle import (
@@ -162,6 +163,23 @@ def build_parser():
     custody_reconstruct_parser.add_argument(
         "--object-id",
         help="Specific object ID to reconstruct",
+    )
+
+    network_reconstruct_parser = commands.add_parser(
+        "reconstruct-network",
+        help="Reconstruct an object from replicated custody metadata",
+    )
+
+    network_reconstruct_parser.add_argument(
+        "--object-id",
+        required=True,
+        help="Object ID to reconstruct",
+    )
+
+    network_reconstruct_parser.add_argument(
+        "--peer",
+        required=True,
+        help="Address of a custodian holding the custody view",
     )
 
     return parser
@@ -441,6 +459,39 @@ def main():
             "Source: custodian network"
         )
     
+        print(
+            "Canonical verification: passed"
+        )
+
+    elif args.command == "reconstruct-network":
+        package = reconstruct_from_network(
+            object_id=args.object_id,
+            peer_address=args.peer,
+        )
+
+        parsed = parse_state_package(
+            package
+        )
+
+        print(
+            f"Reconstructed: "
+            f"{parsed['address']}"
+        )
+
+        print(
+            f"Size: "
+            f"{len(package)} bytes"
+        )
+
+        print(
+            f"Object ID: "
+            f"{get_object_id(package)}"
+        )
+
+        print(
+            "Source: replicated custody metadata"
+        )
+
         print(
             "Canonical verification: passed"
         )

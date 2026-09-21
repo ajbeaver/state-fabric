@@ -95,6 +95,51 @@ def save_leases(
     )
 
 
+def replicate_custody_view(
+    offer_dir: Path,
+    object_id: str,
+    leases: dict,
+) -> None:
+    custody = {
+        fragment_key: lease
+        for fragment_key, lease in sorted(
+            leases.items(),
+            key=lambda item: int(item[0]),
+        )
+        if lease["status"] == "leased"
+    }
+
+    peers_dir = (
+        offer_dir
+        .parent
+        .parent
+        .parent
+    )
+
+    for lease in custody.values():
+        custodian_dir = find_peer_dir(
+            lease["custodian"],
+            peers_dir,
+        )
+
+        custody_path = (
+            custodian_dir
+            / "data"
+            / object_id
+            / "custody.json"
+        )
+
+        custody_path.write_text(
+            json.dumps(
+                custody,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
 def expire_leases(
     offer_dir: Path,
     now: datetime | None = None,
@@ -506,6 +551,11 @@ def confirm_custody(
         / "lease.json"
     )
 
+    manifest_path = (
+        destination_dir
+        / "manifest.json"
+    )
+
     try:
         shutil.copyfile(
             source_path,
@@ -530,6 +580,11 @@ def confirm_custody(
             raise ValueError(
                 "Copied fragment hash mismatch"
             )
+
+        shutil.copyfile(
+            offer_dir / "manifest.json",
+            manifest_path,
+        )
 
         now = utc_now()
 
@@ -595,12 +650,21 @@ def confirm_custody(
             leases,
         )
 
+        replicate_custody_view(
+            offer_dir,
+            object_id,
+            leases,
+        )
+
     except Exception:
         if destination_path.exists():
             destination_path.unlink()
 
         if receipt_path.exists():
             receipt_path.unlink()
+
+        if manifest_path.exists():
+            manifest_path.unlink()
 
         release_reservation(
             offer_dir,
@@ -822,6 +886,176 @@ def reconstruct_from_custody(
         )
 
     if get_object_id(package) != manifest["object_id"]:
+        raise ValueError(
+            "Reconstructed object hash mismatch"
+        )
+
+    if not verify_state_package(
+        package
+    ):
+        raise ValueError(
+            "Reconstructed state failed "
+            "canonical verification"
+        )
+
+    return package
+
+
+def reconstruct_from_network(
+    object_id: str,
+    peer_address: str,
+    peers_dir: Path = DEFAULT_PEERS_DIR,
+) -> bytes:
+    peer_dir = find_peer_dir(
+        peer_address,
+        peers_dir,
+    )
+
+    object_dir = (
+        peer_dir
+        / "data"
+        / object_id
+    )
+
+    manifest_path = (
+        object_dir
+        / "manifest.json"
+    )
+
+    custody_path = (
+        object_dir
+        / "custody.json"
+    )
+
+    if not manifest_path.exists():
+        raise ValueError(
+            "Starting peer manifest does not exist"
+        )
+
+    if not custody_path.exists():
+        raise ValueError(
+            "Starting peer custody view does not exist"
+        )
+
+    manifest = json.loads(
+        manifest_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    custody = json.loads(
+        custody_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    if manifest["object_id"] != object_id:
+        raise ValueError(
+            "Local manifest object ID mismatch"
+        )
+
+    encoding = manifest["encoding"]
+
+    if encoding["type"] != "reed-solomon":
+        raise ValueError(
+            "Network reconstruction currently "
+            "supports erasure-coded offers only"
+        )
+
+    required = encoding[
+        "required_fragments"
+    ]
+
+    valid_fragments = []
+    used_indices = set()
+    now = utc_now()
+
+    for fragment_key, lease in sorted(
+        custody.items(),
+        key=lambda item: int(item[0]),
+    ):
+        fragment_index = int(
+            fragment_key
+        )
+
+        if fragment_index in used_indices:
+            continue
+
+        if lease["status"] != "leased":
+            continue
+
+        if parse_time(lease["expires_at"]) <= now:
+            continue
+
+        try:
+            fragment = get_manifest_fragment(
+                manifest,
+                fragment_index,
+            )
+
+            custodian_dir = find_peer_dir(
+                lease["custodian"],
+                peers_dir,
+            )
+        except ValueError:
+            continue
+
+        fragment_path = (
+            custodian_dir
+            / "data"
+            / object_id
+            / fragment["filename"]
+        )
+
+        if not fragment_path.exists():
+            continue
+
+        fragment_bytes = (
+            fragment_path.read_bytes()
+        )
+
+        if len(fragment_bytes) != fragment["size"]:
+            continue
+
+        fragment_hash = (
+            f"0x{keccak(fragment_bytes).hex()}"
+        )
+
+        if fragment_hash != fragment["hash"]:
+            continue
+
+        used_indices.add(
+            fragment_index
+        )
+
+        valid_fragments.append(
+            (
+                fragment["coefficient"],
+                fragment_bytes,
+            )
+        )
+
+        if len(valid_fragments) >= required:
+            break
+
+    if len(valid_fragments) < required:
+        raise ValueError(
+            f"Not enough valid network fragments: "
+            f"{len(valid_fragments)} available, "
+            f"{required} required"
+        )
+
+    package = erasure_decode_2_of_5(
+        valid_fragments,
+        manifest["original_size"],
+    )
+
+    if len(package) != manifest["original_size"]:
+        raise ValueError(
+            "Reconstructed object size mismatch"
+        )
+
+    if get_object_id(package) != object_id:
         raise ValueError(
             "Reconstructed object hash mismatch"
         )

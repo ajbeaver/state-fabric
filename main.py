@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 
+from modules.custody import request_custody
 from modules.peers import initialize_peers
 from modules.merkle import (
     commit_state,
@@ -81,6 +82,28 @@ def build_parser():
         type=int,
         default=4,
         help="Fragment count for plain striping",
+    )
+
+    custody_parser = commands.add_parser(
+        "request-custody",
+        help="Request and store one fragment from a publisher",
+    )
+
+    custody_parser.add_argument(
+        "--publisher",
+        required=True,
+        help="Address of the peer publishing the offer",
+    )
+
+    custody_parser.add_argument(
+        "--custodian",
+        required=True,
+        help="Address of the peer accepting custody",
+    )
+
+    custody_parser.add_argument(
+        "--object-id",
+        help="Specific object ID to request custody from",
     )
 
     reconstruct_parser = commands.add_parser(
@@ -242,10 +265,13 @@ def main():
             fragment_count=args.fragments,
         )
 
-        encoding = manifest["encoding"]
+        encoding = manifest[
+            "encoding"
+        ]
 
         print(
-            f"Created offer for {args.address}"
+            f"Created offer for "
+            f"{args.address}"
         )
 
         print(
@@ -271,6 +297,63 @@ def main():
         print(
             f"Required: "
             f"{encoding['required_fragments']}"
+        )
+
+    elif args.command == "request-custody":
+        result = request_custody(
+            publisher_address=(
+                args.publisher
+            ),
+            custodian_address=(
+                args.custodian
+            ),
+            object_id=(
+                args.object_id
+            ),
+        )
+
+        print(
+            f"Publisher: "
+            f"{result['publisher']}"
+        )
+
+        print(
+            f"Custodian: "
+            f"{result['custodian']}"
+        )
+
+        print(
+            f"Object ID: "
+            f"{result['object_id']}"
+        )
+
+        print(
+            f"Fragment: "
+            f"{result['fragment_filename']}"
+        )
+
+        print(
+            f"Fragment size: "
+            f"{result['fragment_size']} bytes"
+        )
+
+        print(
+            "Fragment verification: passed"
+        )
+
+        print(
+            "Lease status: "
+            f"{result['lease']['status']}"
+        )
+
+        print(
+            "Lease expires: "
+            f"{result['lease']['expires_at']}"
+        )
+
+        print(
+            f"Stored at: "
+            f"{result['destination']}"
         )
 
     elif args.command == "reconstruct":

@@ -1,10 +1,20 @@
 import argparse
+from pathlib import Path
 
 from modules.peers import initialize_peers
 from modules.merkle import (
     commit_state,
     verify_peer,
 )
+from modules.storage import (
+    create_offer,
+    reconstruct_offer,
+    get_object_id,
+    parse_state_package,
+)
+
+
+DEFAULT_PEERS_DIR = Path("data/peers")
 
 
 def build_parser():
@@ -45,7 +55,144 @@ def build_parser():
         help="Ethereum address of the peer to verify",
     )
 
+    offer_parser = commands.add_parser(
+        "offer",
+        help="Create a fragmented state offer for a peer",
+    )
+
+    offer_parser.add_argument(
+        "--address",
+        required=True,
+        help="Ethereum address publishing the offer",
+    )
+
+    offer_parser.add_argument(
+        "--encoding",
+        choices=[
+            "stripe",
+            "erasure",
+        ],
+        default="erasure",
+        help="Fragment encoding method",
+    )
+
+    offer_parser.add_argument(
+        "--fragments",
+        type=int,
+        default=4,
+        help="Fragment count for plain striping",
+    )
+
+    reconstruct_parser = commands.add_parser(
+        "reconstruct",
+        help="Reconstruct a state package from an offer",
+    )
+
+    reconstruct_parser.add_argument(
+        "--address",
+        required=True,
+        help="Ethereum address that published the offer",
+    )
+
+    reconstruct_parser.add_argument(
+        "--object-id",
+        help="Specific object ID to reconstruct",
+    )
+
+    drop_parser = commands.add_parser(
+        "drop-fragment",
+        help="Delete one fragment for failure testing",
+    )
+
+    drop_parser.add_argument(
+        "--address",
+        required=True,
+        help="Ethereum address that published the offer",
+    )
+
+    drop_parser.add_argument(
+        "--index",
+        type=int,
+        required=True,
+        help="Fragment index to delete",
+    )
+
+    drop_parser.add_argument(
+        "--object-id",
+        help="Specific object ID containing the fragment",
+    )
+
     return parser
+
+
+def find_offer_dir(
+    address: str,
+    object_id: str | None = None,
+) -> Path:
+    peer_dir = None
+
+    if not DEFAULT_PEERS_DIR.exists():
+        raise ValueError(
+            "Peers directory does not exist"
+        )
+
+    for candidate in DEFAULT_PEERS_DIR.iterdir():
+        if (
+            candidate.is_dir()
+            and candidate.name.lower() == address.lower()
+        ):
+            peer_dir = candidate
+            break
+
+    if peer_dir is None:
+        raise ValueError(
+            f"Peer not found: {address}"
+        )
+
+    offers_dir = (
+        peer_dir
+        / "offers"
+    )
+
+    if not offers_dir.exists():
+        raise ValueError(
+            f"No offers found for {address}"
+        )
+
+    if object_id:
+        offer_dir = (
+            offers_dir
+            / object_id
+        )
+
+        if not offer_dir.exists():
+            raise ValueError(
+                f"Offer not found: {object_id}"
+            )
+
+        return offer_dir
+
+    offers = sorted(
+        (
+            path
+            for path in offers_dir.iterdir()
+            if path.is_dir()
+        ),
+        key=lambda path: path.name,
+    )
+
+    if not offers:
+        raise ValueError(
+            f"No offers found for {address}"
+        )
+
+    if len(offers) > 1:
+        raise ValueError(
+            "Multiple offers found. "
+            "Specify --object-id."
+        )
+
+    return offers[0]
 
 
 def main():
@@ -87,6 +234,102 @@ def main():
                 f"Verification failed: "
                 f"{args.address}"
             )
+
+    elif args.command == "offer":
+        manifest = create_offer(
+            args.address,
+            encoding_type=args.encoding,
+            fragment_count=args.fragments,
+        )
+
+        encoding = manifest["encoding"]
+
+        print(
+            f"Created offer for {args.address}"
+        )
+
+        print(
+            f"Object ID: "
+            f"{manifest['object_id']}"
+        )
+
+        print(
+            f"Object size: "
+            f"{manifest['original_size']} bytes"
+        )
+
+        print(
+            f"Encoding: "
+            f"{encoding['type']}"
+        )
+
+        print(
+            f"Fragments: "
+            f"{encoding['total_fragments']}"
+        )
+
+        print(
+            f"Required: "
+            f"{encoding['required_fragments']}"
+        )
+
+    elif args.command == "reconstruct":
+        offer_dir = find_offer_dir(
+            args.address,
+            args.object_id,
+        )
+
+        package = reconstruct_offer(
+            offer_dir
+        )
+
+        parsed = parse_state_package(
+            package
+        )
+
+        print(
+            f"Reconstructed: "
+            f"{parsed['address']}"
+        )
+
+        print(
+            f"Size: "
+            f"{len(package)} bytes"
+        )
+
+        print(
+            f"Object ID: "
+            f"{get_object_id(package)}"
+        )
+
+        print(
+            "Canonical verification: passed"
+        )
+
+    elif args.command == "drop-fragment":
+        offer_dir = find_offer_dir(
+            args.address,
+            args.object_id,
+        )
+
+        fragment_path = (
+            offer_dir
+            / "fragments"
+            / f"{args.index:03d}.bin"
+        )
+
+        if not fragment_path.exists():
+            raise ValueError(
+                f"Fragment does not exist: "
+                f"{fragment_path.name}"
+            )
+
+        fragment_path.unlink()
+
+        print(
+            f"Deleted fragment "
+            f"{args.index:03d}.bin"
+        )
 
 
 if __name__ == "__main__":

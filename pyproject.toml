@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "state-fabric"
 version = "0.0.1"
-description = "PROJECT_DESCRIPTION"
+description = "Research simulator for distributed, verifiable Ethereum-like state storage"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

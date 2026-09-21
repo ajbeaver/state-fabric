@@ -2,6 +2,8 @@ import argparse
 from pathlib import Path
 
 from modules.custody import (
+    renew_custody,
+    repair_network,
     request_custody,
     reconstruct_from_custody,
     reconstruct_from_network,
@@ -180,6 +182,46 @@ def build_parser():
         "--peer",
         required=True,
         help="Address of a custodian holding the custody view",
+    )
+
+    renew_parser = commands.add_parser(
+        "renew-custody",
+        help="Renew a custodian's active claim",
+    )
+
+    renew_parser.add_argument(
+        "--object-id",
+        required=True,
+        help="Object ID whose claim should be renewed",
+    )
+
+    renew_parser.add_argument(
+        "--peer",
+        required=True,
+        help="Address of the custodian renewing its claim",
+    )
+
+    repair_parser = commands.add_parser(
+        "repair-network",
+        help="Regenerate one unavailable network fragment",
+    )
+
+    repair_parser.add_argument(
+        "--object-id",
+        required=True,
+        help="Object ID to repair",
+    )
+
+    repair_parser.add_argument(
+        "--peer",
+        required=True,
+        help="Active custodian attempting the repair",
+    )
+
+    repair_parser.add_argument(
+        "--new-custodian",
+        required=True,
+        help="Peer accepting the regenerated fragment",
     )
 
     return parser
@@ -494,6 +536,57 @@ def main():
 
         print(
             "Canonical verification: passed"
+        )
+
+    elif args.command == "renew-custody":
+        result = renew_custody(
+            object_id=args.object_id,
+            peer_address=args.peer,
+        )
+
+        print(
+            f"Custodian: {result['custodian']}"
+        )
+
+        print(
+            f"Fragment: {result['fragment_index']:03d}.bin"
+        )
+
+        print(
+            f"Lease expires: {result['expires_at']}"
+        )
+
+        print(
+            "Replicated custody view: updated"
+        )
+
+    elif args.command == "repair-network":
+        result = repair_network(
+            object_id=args.object_id,
+            peer_address=args.peer,
+            new_custodian_address=(
+                args.new_custodian
+            ),
+        )
+
+        print(
+            f"Repair executor: {result['executor']}"
+        )
+
+        print(
+            f"Fragment: {result['fragment_index']:03d}.bin"
+        )
+
+        print(
+            f"New custodian: {result['custodian']}"
+        )
+
+        print(
+            f"Lease expires: {result['expires_at']}"
+        )
+
+        print(
+            f"Stored at: {result['destination']}"
         )
 
     elif args.command == "drop-fragment":

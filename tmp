@@ -1,0 +1,659 @@
+diff --git a/main.py b/main.py
+index 06f2ae0..46d1a06 100644
+--- a/main.py
++++ b/main.py
+@@ -2,6 +2,8 @@ import argparse
+ from pathlib import Path
+ 
+ from modules.custody import (
++    renew_custody,
++    repair_network,
+     request_custody,
+     reconstruct_from_custody,
+     reconstruct_from_network,
+@@ -182,6 +184,46 @@ def build_parser():
+         help="Address of a custodian holding the custody view",
+     )
+ 
++    renew_parser = commands.add_parser(
++        "renew-custody",
++        help="Renew a custodian's active claim",
++    )
++
++    renew_parser.add_argument(
++        "--object-id",
++        required=True,
++        help="Object ID whose claim should be renewed",
++    )
++
++    renew_parser.add_argument(
++        "--peer",
++        required=True,
++        help="Address of the custodian renewing its claim",
++    )
++
++    repair_parser = commands.add_parser(
++        "repair-network",
++        help="Regenerate one unavailable network fragment",
++    )
++
++    repair_parser.add_argument(
++        "--object-id",
++        required=True,
++        help="Object ID to repair",
++    )
++
++    repair_parser.add_argument(
++        "--peer",
++        required=True,
++        help="Active custodian attempting the repair",
++    )
++
++    repair_parser.add_argument(
++        "--new-custodian",
++        required=True,
++        help="Peer accepting the regenerated fragment",
++    )
++
+     return parser
+ 
+ 
+@@ -496,6 +538,57 @@ def main():
+             "Canonical verification: passed"
+         )
+ 
++    elif args.command == "renew-custody":
++        result = renew_custody(
++            object_id=args.object_id,
++            peer_address=args.peer,
++        )
++
++        print(
++            f"Custodian: {result['custodian']}"
++        )
++
++        print(
++            f"Fragment: {result['fragment_index']:03d}.bin"
++        )
++
++        print(
++            f"Lease expires: {result['expires_at']}"
++        )
++
++        print(
++            "Replicated custody view: updated"
++        )
++
++    elif args.command == "repair-network":
++        result = repair_network(
++            object_id=args.object_id,
++            peer_address=args.peer,
++            new_custodian_address=(
++                args.new_custodian
++            ),
++        )
++
++        print(
++            f"Repair executor: {result['executor']}"
++        )
++
++        print(
++            f"Fragment: {result['fragment_index']:03d}.bin"
++        )
++
++        print(
++            f"New custodian: {result['custodian']}"
++        )
++
++        print(
++            f"Lease expires: {result['expires_at']}"
++        )
++
++        print(
++            f"Stored at: {result['destination']}"
++        )
++
+     elif args.command == "drop-fragment":
+         offer_dir = find_offer_dir(
+             args.address,
+diff --git a/modules/custody.py b/modules/custody.py
+index 5bacaee..1fcf2d9 100644
+--- a/modules/custody.py
++++ b/modules/custody.py
+@@ -10,6 +10,7 @@ from modules.merkle import find_peer_dir
+ from modules.peers import can_accept
+ from modules.storage import (
+     erasure_decode_2_of_5,
++    erasure_encode_2_of_5,
+     get_object_id,
+     load_manifest,
+     parse_state_package,
+@@ -1069,3 +1070,528 @@ def reconstruct_from_network(
+         )
+ 
+     return package
++
++
++def load_network_metadata(
++    object_id: str,
++    peer_address: str,
++    peers_dir: Path = DEFAULT_PEERS_DIR,
++) -> tuple[Path, dict, dict]:
++    peer_dir = find_peer_dir(
++        peer_address,
++        peers_dir,
++    )
++
++    object_dir = (
++        peer_dir
++        / "data"
++        / object_id
++    )
++
++    manifest_path = (
++        object_dir
++        / "manifest.json"
++    )
++
++    custody_path = (
++        object_dir
++        / "custody.json"
++    )
++
++    if not manifest_path.exists():
++        raise ValueError(
++            "Starting peer manifest does not exist"
++        )
++
++    if not custody_path.exists():
++        raise ValueError(
++            "Starting peer custody view does not exist"
++        )
++
++    manifest = json.loads(
++        manifest_path.read_text(
++            encoding="utf-8"
++        )
++    )
++
++    custody = json.loads(
++        custody_path.read_text(
++            encoding="utf-8"
++        )
++    )
++
++    if manifest["object_id"] != object_id:
++        raise ValueError(
++            "Local manifest object ID mismatch"
++        )
++
++    return object_dir, manifest, custody
++
++
++def get_valid_active_fragments(
++    object_id: str,
++    manifest: dict,
++    custody: dict,
++    peers_dir: Path = DEFAULT_PEERS_DIR,
++    now: datetime | None = None,
++) -> list[tuple[int, dict, dict, bytes]]:
++    if now is None:
++        now = utc_now()
++
++    valid = []
++    used_indices = set()
++
++    for fragment_key, lease in sorted(
++        custody.items(),
++        key=lambda item: int(item[0]),
++    ):
++        fragment_index = int(
++            fragment_key
++        )
++
++        if fragment_index in used_indices:
++            continue
++
++        if lease["status"] != "leased":
++            continue
++
++        if parse_time(lease["expires_at"]) <= now:
++            continue
++
++        try:
++            fragment = get_manifest_fragment(
++                manifest,
++                fragment_index,
++            )
++
++            custodian_dir = find_peer_dir(
++                lease["custodian"],
++                peers_dir,
++            )
++        except ValueError:
++            continue
++
++        fragment_path = (
++            custodian_dir
++            / "data"
++            / object_id
++            / fragment["filename"]
++        )
++
++        if not fragment_path.exists():
++            continue
++
++        fragment_bytes = (
++            fragment_path.read_bytes()
++        )
++
++        if len(fragment_bytes) != fragment["size"]:
++            continue
++
++        fragment_hash = (
++            f"0x{keccak(fragment_bytes).hex()}"
++        )
++
++        if fragment_hash != fragment["hash"]:
++            continue
++
++        used_indices.add(
++            fragment_index
++        )
++
++        valid.append(
++            (
++                fragment_index,
++                lease,
++                fragment,
++                fragment_bytes,
++            )
++        )
++
++    return valid
++
++
++def replicate_network_custody(
++    object_id: str,
++    custody: dict,
++    peers_dir: Path = DEFAULT_PEERS_DIR,
++    additional_peers: tuple[str, ...] = (),
++) -> None:
++    now = utc_now()
++
++    addresses = {
++        lease["custodian"]
++        for lease in custody.values()
++        if (
++            lease["status"] == "leased"
++            and parse_time(
++                lease["expires_at"]
++            ) > now
++        )
++    }
++
++    addresses.update(
++        additional_peers
++    )
++
++    content = (
++        json.dumps(
++            custody,
++            indent=2,
++            sort_keys=True,
++        )
++        + "\n"
++    )
++
++    for address in sorted(
++        addresses,
++        key=str.lower,
++    ):
++        try:
++            custodian_dir = find_peer_dir(
++                address,
++                peers_dir,
++            )
++        except ValueError:
++            continue
++
++        custody_path = (
++            custodian_dir
++            / "data"
++            / object_id
++            / "custody.json"
++        )
++
++        if custody_path.parent.exists():
++            custody_path.write_text(
++                content,
++                encoding="utf-8",
++            )
++
++
++def renew_custody(
++    object_id: str,
++    peer_address: str,
++    peers_dir: Path = DEFAULT_PEERS_DIR,
++    lease_seconds: int = DEFAULT_LEASE_SECONDS,
++) -> dict:
++    object_dir, manifest, custody = (
++        load_network_metadata(
++            object_id,
++            peer_address,
++            peers_dir,
++        )
++    )
++
++    now = utc_now()
++    matching = [
++        (fragment_key, lease)
++        for fragment_key, lease
++        in custody.items()
++        if (
++            lease["custodian"].lower()
++            == peer_address.lower()
++        )
++    ]
++
++    if len(matching) != 1:
++        raise ValueError(
++            "Peer must have exactly one custody claim"
++        )
++
++    fragment_key, lease = matching[0]
++
++    if (
++        lease["status"] != "leased"
++        or parse_time(lease["expires_at"]) <= now
++    ):
++        raise ValueError(
++            "Custody claim is not active"
++        )
++
++    fragment = get_manifest_fragment(
++        manifest,
++        int(fragment_key),
++    )
++
++    fragment_path = (
++        object_dir
++        / fragment["filename"]
++    )
++
++    if not fragment_path.exists():
++        raise ValueError(
++            "Custodian fragment is missing"
++        )
++
++    fragment_bytes = fragment_path.read_bytes()
++
++    if (
++        len(fragment_bytes) != fragment["size"]
++        or f"0x{keccak(fragment_bytes).hex()}"
++        != fragment["hash"]
++    ):
++        raise ValueError(
++            "Custodian fragment is invalid"
++        )
++
++    expires_at = (
++        parse_time(lease["expires_at"])
++        + timedelta(seconds=lease_seconds)
++    )
++
++    lease["expires_at"] = format_time(
++        expires_at
++    )
++
++    receipt_path = (
++        object_dir
++        / "lease.json"
++    )
++
++    receipt = json.loads(
++        receipt_path.read_text(
++            encoding="utf-8"
++        )
++    )
++
++    receipt["expires_at"] = (
++        lease["expires_at"]
++    )
++
++    receipt_path.write_text(
++        json.dumps(
++            receipt,
++            indent=2,
++            sort_keys=True,
++        )
++        + "\n",
++        encoding="utf-8",
++    )
++
++    replicate_network_custody(
++        object_id,
++        custody,
++        peers_dir,
++    )
++
++    return {
++        "fragment_index": int(fragment_key),
++        "custodian": peer_address,
++        "expires_at": lease["expires_at"],
++    }
++
++
++def repair_network(
++    object_id: str,
++    peer_address: str,
++    new_custodian_address: str,
++    peers_dir: Path = DEFAULT_PEERS_DIR,
++    lease_seconds: int = DEFAULT_LEASE_SECONDS,
++) -> dict:
++    object_dir, manifest, custody = (
++        load_network_metadata(
++            object_id,
++            peer_address,
++            peers_dir,
++        )
++    )
++
++    if manifest["encoding"]["type"] != "reed-solomon":
++        raise ValueError(
++            "Network repair supports "
++            "erasure-coded offers only"
++        )
++
++    valid = get_valid_active_fragments(
++        object_id,
++        manifest,
++        custody,
++        peers_dir,
++    )
++
++    active_addresses = {
++        lease["custodian"]
++        for _, lease, _, _ in valid
++    }
++
++    if not active_addresses:
++        raise ValueError(
++            "No active custodians available"
++        )
++
++    executor = min(
++        active_addresses,
++        key=str.lower,
++    )
++
++    if peer_address.lower() != executor.lower():
++        raise ValueError(
++            f"Repair executor is {executor}"
++        )
++
++    active_indices = {
++        fragment_index
++        for fragment_index, _, _, _ in valid
++    }
++
++    missing_indices = [
++        fragment["index"]
++        for fragment in sorted(
++            manifest["fragments"],
++            key=lambda item: item["index"],
++        )
++        if fragment["index"] not in active_indices
++    ]
++
++    if not missing_indices:
++        raise ValueError(
++            "No missing or expired fragments"
++        )
++
++    required = manifest[
++        "encoding"
++    ]["required_fragments"]
++
++    if len(valid) < required:
++        raise ValueError(
++            f"Not enough valid active fragments: "
++            f"{len(valid)} available, "
++            f"{required} required"
++        )
++
++    if any(
++        lease["custodian"].lower()
++        == new_custodian_address.lower()
++        for lease in custody.values()
++    ):
++        raise ValueError(
++            "New custodian already has a claim "
++            "for this object"
++        )
++
++    new_custodian_dir = find_peer_dir(
++        new_custodian_address,
++        peers_dir,
++    )
++
++    fragment_index = missing_indices[0]
++    fragment = get_manifest_fragment(
++        manifest,
++        fragment_index,
++    )
++
++    if not can_accept(
++        new_custodian_dir,
++        fragment["size"],
++    ):
++        raise ValueError(
++            "New custodian does not have "
++            "enough capacity"
++        )
++
++    recovery_fragments = [
++        (
++            item["coefficient"],
++            fragment_bytes,
++        )
++        for _, _, item, fragment_bytes
++        in valid[:required]
++    ]
++
++    package = erasure_decode_2_of_5(
++        recovery_fragments,
++        manifest["original_size"],
++    )
++
++    if get_object_id(package) != object_id:
++        raise ValueError(
++            "Reconstructed object hash mismatch"
++        )
++
++    if not verify_state_package(package):
++        raise ValueError(
++            "Reconstructed state failed "
++            "canonical verification"
++        )
++
++    regenerated = erasure_encode_2_of_5(
++        package
++    )[fragment_index][1]
++
++    if (
++        len(regenerated) != fragment["size"]
++        or f"0x{keccak(regenerated).hex()}"
++        != fragment["hash"]
++    ):
++        raise ValueError(
++            "Regenerated fragment does not "
++            "match the manifest"
++        )
++
++    destination_dir = (
++        new_custodian_dir
++        / "data"
++        / object_id
++    )
++
++    destination_dir.mkdir(
++        parents=True,
++        exist_ok=True,
++    )
++
++    destination_path = (
++        destination_dir
++        / fragment["filename"]
++    )
++
++    destination_path.write_bytes(
++        regenerated
++    )
++
++    shutil.copyfile(
++        object_dir / "manifest.json",
++        destination_dir / "manifest.json",
++    )
++
++    now = utc_now()
++    expires_at = now + timedelta(
++        seconds=lease_seconds
++    )
++
++    lease_record = {
++        "custodian": new_custodian_dir.name,
++        "status": "leased",
++        "started_at": format_time(now),
++        "expires_at": format_time(expires_at),
++    }
++
++    custody[str(fragment_index)] = (
++        lease_record
++    )
++
++    write_local_lease_receipt(
++        custodian_dir=new_custodian_dir,
++        object_id=object_id,
++        publisher_address=manifest["address"],
++        fragment_index=fragment_index,
++        started_at=lease_record["started_at"],
++        expires_at=lease_record["expires_at"],
++    )
++
++    replicate_network_custody(
++        object_id,
++        custody,
++        peers_dir,
++        additional_peers=(
++            new_custodian_dir.name,
++        ),
++    )
++
++    return {
++        "executor": executor,
++        "fragment_index": fragment_index,
++        "custodian": new_custodian_dir.name,
++        "destination": str(destination_path),
++        "expires_at": lease_record["expires_at"],
++    }

@@ -99,7 +99,7 @@ content addressing
 
 custody / retention
     decide availability
-````
+```
 
 ---
 
@@ -309,7 +309,7 @@ That is not acceptable.
 The project is now separating:
 
 ```text
-state value identity
+value-byte identity
 canonical commitment identity
 witness identity
 ```
@@ -322,30 +322,31 @@ These are different things.
 
 A state value should be durable content.
 
-Its identity should depend on the canonical state key/value bytes, not on the current global root or proof.
+Its `value_id` depends only on canonical value bytes, not on the state key, current global root, or proof.
 
 Conceptually:
 
 ```text
-StateValue
-
-state_key
-value_bytes
-
-state_value_id = hash(canonical key/value bytes)
+state_key = authenticated location
+canonical_value_bytes = canonical content stored at that location
+value_id = Keccak(canonical_value_bytes)
 ```
 
 If those bytes remain unchanged:
 
 ```text
-state_value_id_before
+value_id_before
 ==
-state_value_id_after
+value_id_after
 ```
 
 even if the global canonical root changes.
 
-If the value changes, the content ID changes.
+If the value bytes change, the content ID changes. Two different state keys may share one stored value object when their canonical value bytes are identical.
+
+The authenticated binding is the relationship between `state_key` and those value bytes under a canonical commitment. A witness proves that binding under a trusted root; the shared `value_id` does not identify an account or a key/value assignment.
+
+In the current toy implementation, value bytes and authenticated-node bytes are retained in local content-addressed stores under `data/reference/`. Distribution of these new object types through the erasure/custody network remains future Phase 2+ work.
 
 The project is deliberately moving away from treating "one Ethereum account" as the permanent fundamental object type.
 
@@ -777,9 +778,9 @@ The purpose is to break assumptions that work in the simulator but would fail at
 
 Current areas include:
 
-* separating state identity from canonical witnesses
+* separating value-byte identity from canonical witnesses
 * retaining authenticated structure required for proof regeneration
-* regenerating witnesses from distributed state
+* regenerating witnesses from retained authenticated structure
 * making the commitment scheme replaceable
 * asynchronous canonical progress vs storage convergence
 * chain-scale ingestion measurement
@@ -813,9 +814,9 @@ Availability metadata does not define object identity.
 
 **State-value identity is independent of global root changes.**
 
-If the state key/value bytes do not change, the state-value ID should not change.
+If canonical value bytes do not change, `value_id = Keccak(canonical_value_bytes)` does not change, regardless of the state key or canonical root.
 
-**Canonical commitment identity and state identity are separate.**
+**Canonical commitment identity and value identity are separate.**
 
 A state value does not contain its canonical truth.
 

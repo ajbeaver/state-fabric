@@ -15,6 +15,7 @@ from modules.storage import (
     load_manifest,
     parse_state_package,
     verify_state_package,
+    verify_package_for_manifest,
 )
 
 DEFAULT_PEERS_DIR = Path("data/peers")
@@ -1062,10 +1063,7 @@ def reconstruct_from_network(
             "Reconstructed object hash mismatch"
         )
 
-    if not verify_state_package(
-        package,
-        canonical_height=canonical_height,
-    ):
+    if not verify_package_for_manifest(package, manifest, expected_height=canonical_height):
         raise ValueError(
             "Reconstructed state failed "
             "canonical verification"
@@ -1391,6 +1389,11 @@ def repair_network(
     peers_dir: Path = DEFAULT_PEERS_DIR,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> dict:
+    from modules.retention import protection_for_object
+
+    if not protection_for_object(object_id, peers_dir).protected:
+        raise ValueError("Object is not protected by retention policy")
+
     object_dir, manifest, custody = (
         load_network_metadata(
             object_id,
@@ -1518,7 +1521,7 @@ def repair_network(
             "Reconstructed object hash mismatch"
         )
 
-    if not verify_state_package(package):
+    if not verify_package_for_manifest(package, manifest):
         raise ValueError(
             "Reconstructed state failed "
             "canonical verification"

@@ -4,7 +4,12 @@ import shutil
 from pathlib import Path
 
 from eth_utils import keccak, to_checksum_address
-from modules.canonical_history import commit_at_height, current_commit, register_object
+from modules.canonical_history import (
+    canonical_source,
+    commit_at_height,
+    current_commit,
+    register_object,
+)
 
 from modules.merkle import (
     find_peer_dir,
@@ -540,15 +545,16 @@ def verify_state_package(
     package: bytes,
     reference_dir: Path = DEFAULT_REFERENCE_DIR,
     canonical_height: int | None = None,
+    expected_root: bytes | None = None,
 ) -> bool:
     parsed = parse_state_package(
         package
     )
 
     trusted_root = (
+        expected_root if expected_root is not None else
         bytes.fromhex(commit_at_height(canonical_height, reference_dir)["state_root"][2:])
-        if canonical_height is not None
-        else load_state_root(reference_dir)
+        if canonical_height is not None else load_state_root(reference_dir)
     )
 
     package_root = bytes.fromhex(
@@ -593,6 +599,29 @@ def verify_state_package(
     return (
         current_hash
         == trusted_root
+    )
+
+
+def verify_package_for_manifest(
+    package: bytes,
+    manifest: dict,
+    reference_dir: Path = DEFAULT_REFERENCE_DIR,
+    expected_height: int | None = None,
+) -> bool:
+    """Verify bytes against the manifest's immutable canonical reference."""
+    try:
+        root = canonical_source(reference_dir).root_for_manifest(
+            manifest, expected_sequence=expected_height,
+        )
+    except ValueError:
+        return False
+    return (
+        manifest["object_id"] == get_object_id(package)
+        and verify_state_package(
+            package,
+            reference_dir=reference_dir,
+            expected_root=bytes.fromhex(root[2:]),
+        )
     )
 
 

@@ -84,3 +84,55 @@ def object_at_root(address: str, state_root: str,
 
 def current_object(address: str, reference_dir: Path = DEFAULT_REFERENCE_DIR) -> str:
     return object_at_height(address, current_commit(reference_dir)["height"], reference_dir)
+
+
+class SimulatorCanonicalSource:
+    """Phase 2 provider of ordered, immutable object references."""
+
+    def __init__(self, reference_dir: Path = DEFAULT_REFERENCE_DIR) -> None:
+        self.reference_dir = reference_dir
+
+    def versions(self, address: str) -> list[dict]:
+        versions = [
+            {
+                "address": address.lower(),
+                "sequence": commit["height"],
+                "canonical_id": commit["state_root"],
+                "parent_canonical_id": commit["parent_root"],
+                "object_id": commit["objects"][address.lower()],
+            }
+            for commit in load_history(self.reference_dir)
+            if address.lower() in commit["objects"]
+        ]
+        return sorted(versions, key=lambda version: version["sequence"])
+
+    def version_for_object(self, object_id: str) -> dict:
+        for commit in sorted(load_history(self.reference_dir),
+                             key=lambda item: item["height"], reverse=True):
+            for address, candidate in commit["objects"].items():
+                if candidate == object_id:
+                    return {
+                        "address": address,
+                        "sequence": commit["height"],
+                        "canonical_id": commit["state_root"],
+                        "parent_canonical_id": commit["parent_root"],
+                        "object_id": object_id,
+                    }
+        raise ValueError(f"Canonical object not found: {object_id}")
+
+    def root_for_manifest(self, manifest: dict,
+                          expected_sequence: int | None = None) -> str:
+        height = manifest["canonical_height"]
+        if expected_sequence is not None and expected_sequence != height:
+            raise ValueError("Requested canonical sequence does not match object")
+        commit = commit_at_height(height, self.reference_dir)
+        if (commit["state_root"] != manifest["state_root"]
+                or commit["objects"].get(manifest["address"].lower())
+                != manifest["object_id"]):
+            raise ValueError("Object manifest does not match canonical source")
+        return commit["state_root"]
+
+
+def canonical_source(reference_dir: Path = DEFAULT_REFERENCE_DIR) -> SimulatorCanonicalSource:
+    """Single replacement point for Phase 3's external canonical provider."""
+    return SimulatorCanonicalSource(reference_dir)

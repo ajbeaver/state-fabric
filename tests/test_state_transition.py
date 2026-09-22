@@ -17,8 +17,10 @@ from modules.merkle import commit_state
 from modules.peers import initialize_peers, mutate_peer_state
 from modules.storage import create_offer, reconstruct_offer, verify_state_package
 from modules.retention import (
+    meets_protection_target,
     object_health,
     protection_for_object,
+    protected_window_healthy,
     repair_required,
     should_protect,
 )
@@ -107,9 +109,11 @@ def test_policy_uses_canonical_order_without_sequence_arithmetic():
     assert should_protect(versions[0], versions, False).protected
     assert should_protect(versions[0], versions, True).role == "historical"
     assert not should_protect(versions[0], versions, True).protected
+    assert not protected_window_healthy(versions, lambda object_id: object_id == "Z")
+    assert protected_window_healthy(versions, lambda object_id: object_id in {"Y", "Z"})
 
 
-def test_historical_x_retires_only_after_recoverable_z_and_y_z_repair(network):
+def test_historical_x_retires_after_safe_newer_version_and_y_z_repair(network):
     alice = network.publisher
     x = network.object_id
     nonce_path = network.peers_dir / alice / "cache" / "self" / "nonce"
@@ -140,7 +144,8 @@ def test_historical_x_retires_only_after_recoverable_z_and_y_z_repair(network):
     assert len({x, y, z}) == 3
     pending = protection_for_object(x)
     assert pending.protected
-    assert pending.role == "awaiting-recoverable-replacement"
+    assert pending.role == "awaiting-protected-window"
+    assert meets_protection_target(y)
 
     distribute(z)
     assert protection_for_object(z).role == "current"

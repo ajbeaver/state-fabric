@@ -20,7 +20,14 @@ from modules.canonical_history import (
 )
 from modules.merkle import commit_state, load_peer_dirs, load_state_root, verify_peer
 from modules.peers import initialize_peers, mutate_peer_state
-from modules.retention import object_health, protection_for_object, repair_required
+from modules.retention import (
+    independently_recoverable,
+    latest_safely_protected_predecessor,
+    meets_protection_target,
+    object_health,
+    protection_for_object,
+    repair_required,
+)
 from modules.storage import create_offer, get_object_id, reconstruct_offer, verify_state_package
 
 
@@ -284,11 +291,12 @@ def run_experiment() -> None:
             "Height two does not resolve to Z")
     require(current_object(publisher) == object_z, "Z is not canonical current")
     pending = protection_for_object(object_x)
-    require(pending.protected and pending.role == "awaiting-recoverable-replacement",
-            "X retired before Z became independently recoverable")
+    require(pending.protected and pending.role == "awaiting-protected-window"
+            and meets_protection_target(object_y),
+            "X must remain protected until the full window is safe")
     print(f"  Object Z: {object_z}")
     print(f"  Height: {height_z}; root: {manifest_z['state_root']}")
-    print("  X remains protected while Z is not yet recoverable")
+    print("  Y is safe; X remains protected while Z is incomplete")
 
     print("[15/25] Distributing Z", flush=True)
     for custodian in custodians:
@@ -411,7 +419,134 @@ def run_experiment() -> None:
             "X unexpectedly regained protection")
     print("  Canonical current: Z; protected fallback: Y; unprotected historical: X")
     print("  Retirement changed protection, not stored bytes")
+    print("Happy-path lifecycle passed")
+    run_failure_experiment()
     print("Full run passed")
+
+
+def run_failure_experiment() -> None:
+    print("\n=== Phase 2 #12: transition failures ===")
+    active = [path.name for path in load_peer_dirs()]
+    publisher = active[0]
+    custodians = active[1:]
+    require(len(custodians) == 5, "Failure experiment needs five custodians")
+    nonce_path = PEERS_DIR / publisher / "cache" / "self" / "nonce"
+
+    def next_offer() -> dict:
+        nonce = int(nonce_path.read_text(encoding="utf-8").strip())
+        mutate_peer_state(publisher, nonce=nonce + 1)
+        commit_state()
+        return create_offer(publisher, encoding_type="erasure")
+
+    print("[failure 1/8] Establishing a safely protected predecessor", flush=True)
+    commit_state()
+    first = create_offer(publisher, encoding_type="erasure")
+    x = first["object_id"]
+    for custodian in custodians:
+        request_custody(publisher, custodian, x)
+    require(meets_protection_target(x), "Failure baseline X is not safe")
+    print(f"  Publisher: {publisher}")
+    print(f"  X: {x}; verified health {object_health(x)[0]}/{first['encoding']['total_fragments']}")
+
+    print("[failure 2/8] Advancing canonical Y with one fragment", flush=True)
+    second = next_offer()
+    y = second["object_id"]
+    request_custody(publisher, custodians[0], y)
+    require(current_object(publisher) == y, "Y is not canonical current")
+    require(object_health(y)[0] == 1 and not independently_recoverable(y)
+            and not meets_protection_target(y), "Y one-fragment state misreported")
+    require(protection_for_object(x).protected, "Safe X lost protection")
+    print("  canonical current: Y; verified health: 1/5")
+    print("  reconstructable: no; protection target met: no")
+    print("  latest safely protected predecessor: X")
+
+    print("[failure 3/8] Advancing canonical Z at reconstruction threshold", flush=True)
+    third = next_offer()
+    z = third["object_id"]
+    for custodian in custodians[:2]:
+        request_custody(publisher, custodian, z)
+    package = reconstruct_from_network(z, custodians[0])
+    require(get_object_id(package) == z and independently_recoverable(z)
+            and not meets_protection_target(z), "Z threshold state misreported")
+    require(current_object(publisher) == z and protection_for_object(x).protected,
+            "Canonical advance falsely retired X")
+    predecessor = latest_safely_protected_predecessor(publisher)
+    require(predecessor is not None and predecessor["object_id"] == x,
+            "X should remain the latest safe predecessor")
+    print("  canonical current: Z; verified health: 2/5")
+    print("  reconstructable: yes; protection target met: no")
+    print("  latest safely protected predecessor: X")
+
+    print("[failure 4/8] Corrupting a claimed Y fragment", flush=True)
+    (PEERS_DIR / custodians[0] / "data" / y / "000.bin").write_bytes(b"corrupt")
+    claimed = len(load_custody(custodians[0], y))
+    require(claimed == 1 and object_health(y)[0] == 0,
+            "Invalid physical bytes counted as protected")
+    require(protection_for_object(x).protected, "Corrupt metadata retired X")
+    print("  Y custody claims: 1; verified valid fragments: 0")
+    print("  X remains protected: yes")
+
+    print("[failure 5/8] Completing Z's protection target", flush=True)
+    for custodian in custodians[2:]:
+        request_custody(publisher, custodian, z)
+    require(meets_protection_target(z) and object_health(z)[0] ==
+            third["encoding"]["total_fragments"], "Z did not reach target")
+    require(protection_for_object(x).protected and repair_required(y),
+            "Unhealthy fallback Y must keep X protected")
+    print("  Z verified health: 5/5; protection target met: yes")
+    print("  Y verified health: 0/5; X remains protected: yes")
+
+    print("[failure 6/8] Restoring the required fallback window", flush=True)
+    source_fragment = PEERS_DIR / publisher / "offers" / y / "fragments" / "000.bin"
+    damaged_fragment = PEERS_DIR / custodians[0] / "data" / y / "000.bin"
+    shutil.copyfile(source_fragment, damaged_fragment)
+    for custodian in custodians[1:]:
+        request_custody(publisher, custodian, y)
+    require(meets_protection_target(y) and meets_protection_target(z),
+            "Current and fallback must both meet their targets")
+    require(not protection_for_object(x).protected,
+            "X should retire only after the full window is healthy")
+    print("  Z current: 5/5; Y fallback: 5/5")
+    print("  X historical/unprotected: yes")
+
+    print("[failure 7/8] Publisher disappears during another partial transition", flush=True)
+    fourth = next_offer()
+    w = fourth["object_id"]
+    request_custody(publisher, custodians[0], w)
+    removed_dir = Path("data/removed_peers") / publisher
+    removed_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(PEERS_DIR / publisher), str(removed_dir))
+    require(current_object(publisher) == w and object_health(w)[0] == 1
+            and not independently_recoverable(w) and not meets_protection_target(w),
+            "Offline partial W was misreported")
+    require(meets_protection_target(z) and protection_for_object(z).protected,
+            "Safe Z predecessor lost protection")
+    predecessor = latest_safely_protected_predecessor(publisher)
+    require(predecessor is not None and predecessor["object_id"] == z,
+            "Z should be the latest safe predecessor")
+    print("  canonical current: W; publisher offline; verified health: 1/5")
+    print("  reconstructable: no; protection target met: no")
+    print("  latest safely protected predecessor: Z")
+
+    print("[failure 8/8] Failing a repair without publishing a claim", flush=True)
+    custody_path = PEERS_DIR / custodians[0] / "data" / w / "custody.json"
+    before = custody_path.read_text(encoding="utf-8")
+    require(repair_required(w), "Under-protected current W needs repair")
+    try:
+        repair_network(w, custodians[0], custodians[1])
+    except ValueError as error:
+        require("Not enough valid active fragments" in str(error),
+                f"Unexpected repair failure: {error}")
+    else:
+        raise RuntimeError("One-fragment W repair incorrectly succeeded")
+    require(custody_path.read_text(encoding="utf-8") == before
+            and not (PEERS_DIR / custodians[1] / "data" / w).exists(),
+            "Failed repair published a false claim")
+    require(object_health(w)[0] == 1 and not meets_protection_target(w)
+            and meets_protection_target(z), "Repair failure changed health truth")
+    print("  repair failed: below reconstruction threshold")
+    print("  W remains 1/5; no new custody claim; Z remains safely protected")
+    print("Transition failure checks passed")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="State Fabric research simulator")

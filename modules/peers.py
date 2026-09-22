@@ -4,6 +4,7 @@ import shutil
 from eth_utils import keccak
 
 from modules.wallets import generate_wallets
+from modules.merkle import find_peer_dir, get_self_cache
 
 
 DEFAULT_PEERS_DIR = Path("data/peers")
@@ -110,6 +111,32 @@ def can_accept(
     return size <= get_available_capacity(
         peer_dir
     )
+
+
+def mutate_peer_state(
+    address: str,
+    balance: int | None = None,
+    nonce: int | None = None,
+    peers_dir: Path = DEFAULT_PEERS_DIR,
+) -> None:
+    if balance is None and nonce is None:
+        raise ValueError("Supply balance and/or nonce")
+
+    for name, value in (("balance", balance), ("nonce", nonce)):
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"{name} must be a non-negative integer")
+
+    self_cache = get_self_cache(find_peer_dir(address, peers_dir))
+    for name, value in (("balance", balance), ("nonce", nonce)):
+        if value is not None:
+            path = self_cache / name
+            if not path.is_file():
+                raise ValueError(f"Missing {name} for peer: {address}")
+
+    if balance is not None:
+        (self_cache / "balance").write_text(f"{balance}\n", encoding="utf-8")
+    if nonce is not None:
+        (self_cache / "nonce").write_text(f"{nonce}\n", encoding="utf-8")
 
 
 def initialize_peers(

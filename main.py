@@ -1,618 +1,293 @@
 import argparse
+import json
+import shutil
 from pathlib import Path
 
 from modules.custody import (
+    get_valid_active_fragments,
+    parse_time,
     renew_custody,
     repair_network,
     request_custody,
-    reconstruct_from_custody,
     reconstruct_from_network,
+    utc_now,
 )
-from modules.peers import initialize_peers
-from modules.merkle import (
-    commit_state,
-    verify_peer,
-)
-from modules.storage import (
-    create_offer,
-    reconstruct_offer,
-    get_object_id,
-    parse_state_package,
-)
+from modules.merkle import commit_state, load_peer_dirs, load_state_root, verify_peer
+from modules.peers import initialize_peers, mutate_peer_state
+from modules.storage import create_offer, get_object_id, reconstruct_offer, verify_state_package
 
 
-DEFAULT_PEERS_DIR = Path("data/peers")
+PEERS_DIR = Path("data/peers")
+EXPIRED_AT = "2000-01-01T00:00:00Z"
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(
-        description="State Fabric research simulator"
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RuntimeError(message)
+
+
+def initialize(count: int) -> int:
+    data_dir = Path("data")
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
+    return initialize_peers(count)
+
+
+def load_custody(peer: str, object_id: str) -> dict:
+    path = PEERS_DIR / peer / "data" / object_id / "custody.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def active_claims(custody: dict) -> dict:
+    now = utc_now()
+    return {
+        key: claim for key, claim in custody.items()
+        if claim["status"] == "leased" and parse_time(claim["expires_at"]) > now
+    }
+
+
+def show_fragments(custody: dict) -> None:
+    now = utc_now()
+    for index, claim in sorted(custody.items(), key=lambda item: int(item[0])):
+        status = "active" if claim["status"] == "leased" and parse_time(claim["expires_at"]) > now else "expired"
+        print(f"  fragment {int(index):03d} -> {claim['custodian']} [{status}]")
+
+
+def show_package(package: bytes, object_id: str) -> None:
+    actual_id = get_object_id(package)
+    canonical = verify_state_package(package)
+    require(actual_id == object_id and canonical, "Reconstructed package failed verification")
+    print(f"  Reconstructed bytes: {len(package)}")
+    print(f"  Reconstructed object ID: {actual_id}")
+    print("  Canonical verification: passed")
+
+
+def verify_current() -> None:
+    peers = load_peer_dirs()
+    root = load_state_root()
+    print(f"Trusted root: 0x{root.hex()}")
+    for peer in peers:
+        require(verify_peer(peer.name), f"Peer verification failed: {peer.name}")
+        print(f"  peer {peer.name}: proof valid")
+    print(f"Peer proofs: {len(peers)}/{len(peers)} verified")
+
+    objects = 0
+    for peer in peers:
+        offers_dir = peer / "offers"
+        if not offers_dir.exists():
+            continue
+        for offer_dir in sorted(path for path in offers_dir.iterdir() if path.is_dir()):
+            manifest = json.loads((offer_dir / "manifest.json").read_text(encoding="utf-8"))
+            require(manifest["object_id"] == offer_dir.name, f"Object ID mismatch: {offer_dir}")
+            if manifest["state_root"] == f"0x{root.hex()}":
+                objects += 1
+    print(f"Current offers: {objects}")
+
+    network_objects: dict[str, list[str]] = {}
+    for peer in peers:
+        data_dir = peer / "data"
+        if not data_dir.exists():
+            continue
+        for object_dir in data_dir.iterdir():
+            if (object_dir / "manifest.json").is_file() and (object_dir / "custody.json").is_file():
+                network_objects.setdefault(object_dir.name, []).append(peer.name)
+    for object_id, custodians in sorted(network_objects.items()):
+        custodian = max(
+            custodians,
+            key=lambda peer: len(active_claims(load_custody(peer, object_id))),
+        )
+        object_dir = PEERS_DIR / custodian / "data" / object_id
+        manifest = json.loads((object_dir / "manifest.json").read_text(encoding="utf-8"))
+        if manifest["state_root"] != f"0x{root.hex()}":
+            continue
+        custody = load_custody(custodian, object_id)
+        valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
+        require(len(valid) >= manifest["encoding"]["required_fragments"],
+                f"Insufficient active fragments: {object_id}")
+        package = reconstruct_from_network(object_id, custodian)
+        require(get_object_id(package) == object_id and verify_state_package(package),
+                f"Distributed object failed verification: {object_id}")
+        print(f"Distributed object {object_id}: {len(valid)}/{manifest['encoding']['total_fragments']} active fragments, canonical verification passed")
+        show_fragments(custody)
+    current_network_objects = sum(
+        json.loads((PEERS_DIR / custodians[0] / "data" / object_id / "manifest.json").read_text(encoding="utf-8"))["state_root"] == f"0x{root.hex()}"
+        for object_id, custodians in network_objects.items()
     )
+    print(f"Current distributed objects: {current_network_objects}")
+    print("  Objects from previous roots are retained but not historically verified")
+    print("Current state verification: passed")
 
-    commands = parser.add_subparsers(
-        dest="command",
-        required=True,
-    )
 
-    init_parser = commands.add_parser(
-        "init",
-        help="Initialize simulated peer devices",
-    )
+def run_experiment() -> None:
+    print("[1/15] Initializing peers", flush=True)
+    require(initialize(7) == 7, "Expected seven peers")
+    addresses = [path.name for path in load_peer_dirs()]
+    publisher, custodians, spare = addresses[0], addresses[1:6], addresses[6]
+    for index, address in enumerate(addresses):
+        role = "publisher" if address == publisher else "spare" if address == spare else "custodian"
+        print(f"  peer {index}: {address} ({role})")
 
-    init_parser.add_argument(
-        "--peers",
-        type=int,
-        default=10,
-        help="Number of peers to generate",
-    )
+    print("[2/15] Committing state", flush=True)
+    root_n = commit_state()
+    print(f"Root N (Alice's original state): 0x{root_n.hex()}")
+    require(all(verify_peer(address) for address in addresses), "Initial peer proof failed")
+    print(f"  Proofs verified: {len(addresses)}/{len(addresses)}")
 
-    commands.add_parser(
-        "commit",
-        help="Commit peer state and generate proofs",
-    )
+    print("[3/15] Creating Alice's original 2-of-5 object X", flush=True)
+    offer_x = create_offer(publisher, encoding_type="erasure")
+    object_x = offer_x["object_id"]
+    encoding = offer_x["encoding"]
+    require((encoding["required_fragments"], encoding["total_fragments"]) == (2, 5),
+            "Expected 2-of-5 encoding")
+    print(f"Object X: {object_x}")
+    print(f"  Publisher: {publisher}")
+    print(f"  Package size: {offer_x['original_size']} bytes")
+    print(f"  Encoding: {encoding['type']}, {encoding['required_fragments']}-of-{encoding['total_fragments']}")
+    offers_dir = PEERS_DIR / publisher / "offers"
+    old_dir = offers_dir / object_x
+    require(old_dir.is_dir(), "Object X offer is missing")
+    print(f"  Offer X: {old_dir}")
 
-    verify_parser = commands.add_parser(
-        "verify",
-        help="Verify a peer's cached state against the state root",
-    )
+    print("\n=== Controlled state transition: Alice before custody ===")
+    print("[4/15] Mutating Alice's local state", flush=True)
+    nonce_path = PEERS_DIR / publisher / "cache" / "self" / "nonce"
+    old_nonce = int(nonce_path.read_text(encoding="utf-8").strip())
+    new_nonce = old_nonce + 1
+    mutate_peer_state(publisher, nonce=new_nonce)
+    require(int(nonce_path.read_text(encoding="utf-8").strip()) == new_nonce,
+            "Nonce mutation was not stored")
+    print(f"  Alice: {publisher}")
+    print(f"  Nonce: {old_nonce} -> {new_nonce}")
 
-    verify_parser.add_argument(
-        "--address",
-        required=True,
-        help="Ethereum address of the peer to verify",
-    )
+    print("[5/15] Committing Alice's mutated state", flush=True)
+    root_next = commit_state()
+    require(root_n != root_next, "Mutation did not change the canonical root")
+    print(f"  Root N+1 (Alice's mutated state): 0x{root_next.hex()}")
+    print("  Root changed: yes")
 
-    offer_parser = commands.add_parser(
-        "offer",
-        help="Create a fragmented state offer for a peer",
-    )
+    print("[6/15] Creating current object Y", flush=True)
+    manifest = create_offer(publisher, encoding_type="erasure")
+    object_id = manifest["object_id"]
+    new_dir = offers_dir / object_id
+    require(object_x != object_id, "Mutation did not change the object ID")
+    require(old_dir.is_dir() and new_dir.is_dir(), "Both offers must remain on disk")
+    print(f"  Object Y: {object_id}")
+    print(f"  Offer Y: {new_dir}")
+    print("  Object changed: yes")
+    print("  Previous object preserved: yes")
 
-    offer_parser.add_argument(
-        "--address",
-        required=True,
-        help="Ethereum address publishing the offer",
-    )
+    print("[7/15] Verifying Alice's new current state", flush=True)
+    package = reconstruct_offer(new_dir)
+    show_package(package, object_id)
+    require(verify_peer(publisher), "Mutated Alice proof failed verification")
+    print("  Alice's updated proof: passed")
+    print("State transition experiment passed")
 
-    offer_parser.add_argument(
-        "--encoding",
-        choices=[
-            "stripe",
-            "erasure",
-        ],
-        default="erasure",
-        help="Fragment encoding method",
-    )
+    print("\n=== Phase 1 custody lifecycle using object Y ===")
 
-    offer_parser.add_argument(
-        "--fragments",
-        type=int,
-        default=4,
-        help="Fragment count for plain striping",
-    )
+    print("[8/15] Distributing current object Y fragments", flush=True)
+    print(f"  Distributing object Y: {object_id}")
+    for custodian in custodians:
+        result = request_custody(publisher, custodian, object_id)
+        print(f"  fragment {result['fragment_index']:03d} ({result['fragment_size']} bytes) -> {custodian}")
+    custody = load_custody(custodians[0], object_id)
+    require(len(active_claims(custody)) == 5, "Expected five active claims")
+    require(all(load_custody(peer, object_id) == custody for peer in custodians),
+            "Custody views differ")
+    print("Active fragments: 5/5; custody views agree")
+    show_fragments(custody)
 
-    custody_parser = commands.add_parser(
-        "request-custody",
-        help="Request and store one fragment from a publisher",
-    )
+    print("[9/15] Reconstructing Y from distributed custody", flush=True)
+    package = reconstruct_from_network(object_id, custodians[0])
+    print(f"  Starting custodian: {custodians[0]}")
+    show_package(package, object_id)
 
-    custody_parser.add_argument(
-        "--publisher",
-        required=True,
-        help="Address of the peer publishing the offer",
-    )
+    print("[10/15] Removing Alice and reconstructing Y", flush=True)
+    removed_dir = Path("data/removed_peers") / publisher
+    removed_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(PEERS_DIR / publisher), str(removed_dir))
+    require(not (PEERS_DIR / publisher).exists(), "Alice remains in the active peer set")
+    print(f"  Alice removed from active peers; files retained at: {removed_dir}")
+    package = reconstruct_from_network(object_id, custodians[0])
+    show_package(package, object_id)
+    print("Publisher-independent reconstruction: passed")
 
-    custody_parser.add_argument(
-        "--custodian",
-        required=True,
-        help="Address of the peer accepting custody",
-    )
+    print("[11/15] Renewing custody", flush=True)
+    before = custody["2"]["expires_at"]
+    renewed = renew_custody(object_id, custodians[2])
+    custody = load_custody(custodians[0], object_id)
+    require(renewed["custodian"] == custodians[2]
+            and parse_time(custody["2"]["expires_at"]) > parse_time(before),
+            "Custody renewal did not extend the lease")
+    print(f"Renewed: {custodians[2]}")
+    print(f"  Fragment: 002; previous expiry: {before}")
+    print(f"  New expiry: {custody['2']['expires_at']}")
 
-    custody_parser.add_argument(
-        "--object-id",
-        help="Specific object ID to request custody from",
-    )
+    print("[12/15] Expiring one fragment claim", flush=True)
+    for path in PEERS_DIR.glob(f"*/data/{object_id}/custody.json"):
+        view = json.loads(path.read_text(encoding="utf-8"))
+        view["0"]["expires_at"] = EXPIRED_AT
+        path.write_text(json.dumps(view, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    custody = load_custody(custodians[0], object_id)
+    valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
+    require(len(valid) == 4 and {item[0] for item in valid} == {1, 2, 3, 4},
+            "Expected only fragment zero to expire")
+    print("Active fragments: 4/5")
+    print(f"  Fragment 000 claim expiry set to {EXPIRED_AT} in replicated custody views")
+    show_fragments(custody)
 
-    reconstruct_parser = commands.add_parser(
-        "reconstruct",
-        help="Reconstruct a state package from an offer",
-    )
+    print("[13/15] Repairing missing fragment", flush=True)
+    executor = min({lease["custodian"] for _, lease, _, _ in valid}, key=str.lower)
+    result = repair_network(object_id, executor, spare)
+    require(result["fragment_index"] == 0 and result["custodian"] == spare,
+            "Repair assigned the wrong fragment or custodian")
+    custody = load_custody(executor, object_id)
+    valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
+    require(len(valid) == 5 and len(active_claims(custody)) == 5,
+            "Repair did not restore five active fragments")
+    print(f"Executor: {executor}; replacement: {spare}")
+    print(f"  Regenerated fragment: {result['fragment_index']:03d}")
+    print(f"  Stored at: {result['destination']}")
+    print("Active fragments: 5/5")
+    show_fragments(custody)
 
-    reconstruct_parser.add_argument(
-        "--address",
-        required=True,
-        help="Ethereum address that published the offer",
-    )
+    print("[14/15] Final reconstruction", flush=True)
+    package = reconstruct_from_network(object_id, executor)
+    print(f"  Starting custodian: {executor}")
+    show_package(package, object_id)
+    print("[15/15] Confirming final Y and preserved X", flush=True)
+    require(get_object_id(package) == object_id, "Final reconstruction was not object Y")
+    require((removed_dir / "offers" / object_x).is_dir(), "Object X was lost")
+    require((removed_dir / "offers" / object_id).is_dir(), "Object Y was lost")
+    print(f"  Reconstructed object Y: {object_id}")
+    print(f"  Preserved object X: {removed_dir / 'offers' / object_x}")
+    print("  Publisher-independent custody lifecycle: passed")
+    print("Full run passed")
 
-    reconstruct_parser.add_argument(
-        "--object-id",
-        help="Specific object ID to reconstruct",
-    )
 
-    drop_parser = commands.add_parser(
-        "drop-fragment",
-        help="Delete one fragment for failure testing",
-    )
-
-    drop_parser.add_argument(
-        "--address",
-        required=True,
-        help="Ethereum address that published the offer",
-    )
-
-    drop_parser.add_argument(
-        "--index",
-        type=int,
-        required=True,
-        help="Fragment index to delete",
-    )
-
-    drop_parser.add_argument(
-        "--object-id",
-        help="Specific object ID containing the fragment",
-    )
-
-    custody_reconstruct_parser = commands.add_parser(
-        "reconstruct-custody",
-        help="Reconstruct an object from leased custodian fragments",
-    )
-    
-    custody_reconstruct_parser.add_argument(
-        "--publisher",
-        required=True,
-        help="Address of the peer that published the object",
-    )
-    
-    custody_reconstruct_parser.add_argument(
-        "--object-id",
-        help="Specific object ID to reconstruct",
-    )
-
-    network_reconstruct_parser = commands.add_parser(
-        "reconstruct-network",
-        help="Reconstruct an object from replicated custody metadata",
-    )
-
-    network_reconstruct_parser.add_argument(
-        "--object-id",
-        required=True,
-        help="Object ID to reconstruct",
-    )
-
-    network_reconstruct_parser.add_argument(
-        "--peer",
-        required=True,
-        help="Address of a custodian holding the custody view",
-    )
-
-    renew_parser = commands.add_parser(
-        "renew-custody",
-        help="Renew a custodian's active claim",
-    )
-
-    renew_parser.add_argument(
-        "--object-id",
-        required=True,
-        help="Object ID whose claim should be renewed",
-    )
-
-    renew_parser.add_argument(
-        "--peer",
-        required=True,
-        help="Address of the custodian renewing its claim",
-    )
-
-    repair_parser = commands.add_parser(
-        "repair-network",
-        help="Regenerate one unavailable network fragment",
-    )
-
-    repair_parser.add_argument(
-        "--object-id",
-        required=True,
-        help="Object ID to repair",
-    )
-
-    repair_parser.add_argument(
-        "--peer",
-        required=True,
-        help="Active custodian attempting the repair",
-    )
-
-    repair_parser.add_argument(
-        "--new-custodian",
-        required=True,
-        help="Peer accepting the regenerated fragment",
-    )
-
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="State Fabric research simulator")
+    commands = parser.add_subparsers(dest="command", required=True)
+    init_parser = commands.add_parser("init", help="Reset and initialize deterministic peers")
+    init_parser.add_argument("--peers", type=int, default=7, help="Number of peers (default: 7)")
+    commands.add_parser("commit", help="Commit current peer state and generate proofs")
+    commands.add_parser("verify", help="Verify current peer proofs and offer roots")
+    commands.add_parser("run", help="Run Phase 1 and the Phase 2 state transition")
     return parser
 
 
-def find_offer_dir(
-    address: str,
-    object_id: str | None = None,
-) -> Path:
-    peer_dir = None
-
-    if not DEFAULT_PEERS_DIR.exists():
-        raise ValueError(
-            "Peers directory does not exist"
-        )
-
-    for candidate in DEFAULT_PEERS_DIR.iterdir():
-        if (
-            candidate.is_dir()
-            and candidate.name.lower() == address.lower()
-        ):
-            peer_dir = candidate
-            break
-
-    if peer_dir is None:
-        raise ValueError(
-            f"Peer not found: {address}"
-        )
-
-    offers_dir = (
-        peer_dir
-        / "offers"
-    )
-
-    if not offers_dir.exists():
-        raise ValueError(
-            f"No offers found for {address}"
-        )
-
-    if object_id:
-        offer_dir = (
-            offers_dir
-            / object_id
-        )
-
-        if not offer_dir.exists():
-            raise ValueError(
-                f"Offer not found: {object_id}"
-            )
-
-        return offer_dir
-
-    offers = sorted(
-        (
-            path
-            for path in offers_dir.iterdir()
-            if path.is_dir()
-        ),
-        key=lambda path: path.name,
-    )
-
-    if not offers:
-        raise ValueError(
-            f"No offers found for {address}"
-        )
-
-    if len(offers) > 1:
-        raise ValueError(
-            "Multiple offers found. "
-            "Specify --object-id."
-        )
-
-    return offers[0]
-
-
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
-
+def main() -> None:
+    args = build_parser().parse_args()
     if args.command == "init":
-        count = initialize_peers(
-            args.peers
-        )
-
-        print(
-            f"Initialized {count} peers "
-            "in data/peers/"
-        )
-
+        print(f"Initialized {initialize(args.peers)} peers in data/peers/")
     elif args.command == "commit":
         root = commit_state()
-
-        print(
-            f"State root: 0x{root.hex()}"
-        )
-
-        print(
-            "Generated proofs for all peers"
-        )
-
+        print(f"Root: 0x{root.hex()}")
+        print("Generated proofs for all peers")
     elif args.command == "verify":
-        valid = verify_peer(
-            args.address
-        )
-
-        if valid:
-            print(
-                f"Verified: {args.address}"
-            )
-        else:
-            print(
-                f"Verification failed: "
-                f"{args.address}"
-            )
-
-    elif args.command == "offer":
-        manifest = create_offer(
-            args.address,
-            encoding_type=args.encoding,
-            fragment_count=args.fragments,
-        )
-
-        encoding = manifest[
-            "encoding"
-        ]
-
-        print(
-            f"Created offer for "
-            f"{args.address}"
-        )
-
-        print(
-            f"Object ID: "
-            f"{manifest['object_id']}"
-        )
-
-        print(
-            f"Object size: "
-            f"{manifest['original_size']} bytes"
-        )
-
-        print(
-            f"Encoding: "
-            f"{encoding['type']}"
-        )
-
-        print(
-            f"Fragments: "
-            f"{encoding['total_fragments']}"
-        )
-
-        print(
-            f"Required: "
-            f"{encoding['required_fragments']}"
-        )
-
-    elif args.command == "request-custody":
-        result = request_custody(
-            publisher_address=(
-                args.publisher
-            ),
-            custodian_address=(
-                args.custodian
-            ),
-            object_id=(
-                args.object_id
-            ),
-        )
-
-        print(
-            f"Publisher: "
-            f"{result['publisher']}"
-        )
-
-        print(
-            f"Custodian: "
-            f"{result['custodian']}"
-        )
-
-        print(
-            f"Object ID: "
-            f"{result['object_id']}"
-        )
-
-        print(
-            f"Fragment: "
-            f"{result['fragment_filename']}"
-        )
-
-        print(
-            f"Fragment size: "
-            f"{result['fragment_size']} bytes"
-        )
-
-        print(
-            "Fragment verification: passed"
-        )
-
-        print(
-            "Lease status: "
-            f"{result['lease']['status']}"
-        )
-
-        print(
-            "Lease expires: "
-            f"{result['lease']['expires_at']}"
-        )
-
-        print(
-            f"Stored at: "
-            f"{result['destination']}"
-        )
-
-    elif args.command == "reconstruct":
-        offer_dir = find_offer_dir(
-            args.address,
-            args.object_id,
-        )
-
-        package = reconstruct_offer(
-            offer_dir
-        )
-
-        parsed = parse_state_package(
-            package
-        )
-
-        print(
-            f"Reconstructed: "
-            f"{parsed['address']}"
-        )
-
-        print(
-            f"Size: "
-            f"{len(package)} bytes"
-        )
-
-        print(
-            f"Object ID: "
-            f"{get_object_id(package)}"
-        )
-
-        print(
-            "Canonical verification: passed"
-        )
-
-    elif args.command == "reconstruct-custody":
-        package = reconstruct_from_custody(
-            publisher_address=(
-                args.publisher
-            ),
-            object_id=(
-                args.object_id
-            ),
-        )
-    
-        parsed = parse_state_package(
-            package
-        )
-    
-        print(
-            f"Reconstructed: "
-            f"{parsed['address']}"
-        )
-    
-        print(
-            f"Size: "
-            f"{len(package)} bytes"
-        )
-    
-        print(
-            f"Object ID: "
-            f"{get_object_id(package)}"
-        )
-    
-        print(
-            "Source: custodian network"
-        )
-    
-        print(
-            "Canonical verification: passed"
-        )
-
-    elif args.command == "reconstruct-network":
-        package = reconstruct_from_network(
-            object_id=args.object_id,
-            peer_address=args.peer,
-        )
-
-        parsed = parse_state_package(
-            package
-        )
-
-        print(
-            f"Reconstructed: "
-            f"{parsed['address']}"
-        )
-
-        print(
-            f"Size: "
-            f"{len(package)} bytes"
-        )
-
-        print(
-            f"Object ID: "
-            f"{get_object_id(package)}"
-        )
-
-        print(
-            "Source: replicated custody metadata"
-        )
-
-        print(
-            "Canonical verification: passed"
-        )
-
-    elif args.command == "renew-custody":
-        result = renew_custody(
-            object_id=args.object_id,
-            peer_address=args.peer,
-        )
-
-        print(
-            f"Custodian: {result['custodian']}"
-        )
-
-        print(
-            f"Fragment: {result['fragment_index']:03d}.bin"
-        )
-
-        print(
-            f"Lease expires: {result['expires_at']}"
-        )
-
-        print(
-            "Replicated custody view: updated"
-        )
-
-    elif args.command == "repair-network":
-        result = repair_network(
-            object_id=args.object_id,
-            peer_address=args.peer,
-            new_custodian_address=(
-                args.new_custodian
-            ),
-        )
-
-        print(
-            f"Repair executor: {result['executor']}"
-        )
-
-        print(
-            f"Fragment: {result['fragment_index']:03d}.bin"
-        )
-
-        print(
-            f"New custodian: {result['custodian']}"
-        )
-
-        print(
-            f"Lease expires: {result['expires_at']}"
-        )
-
-        print(
-            f"Stored at: {result['destination']}"
-        )
-
-    elif args.command == "drop-fragment":
-        offer_dir = find_offer_dir(
-            args.address,
-            args.object_id,
-        )
-
-        fragment_path = (
-            offer_dir
-            / "fragments"
-            / f"{args.index:03d}.bin"
-        )
-
-        if not fragment_path.exists():
-            raise ValueError(
-                f"Fragment does not exist: "
-                f"{fragment_path.name}"
-            )
-
-        fragment_path.unlink()
-
-        print(
-            f"Deleted fragment "
-            f"{args.index:03d}.bin"
-        )
+        verify_current()
+    elif args.command == "run":
+        run_experiment()
 
 
 if __name__ == "__main__":

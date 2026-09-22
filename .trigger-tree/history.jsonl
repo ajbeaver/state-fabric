@@ -15,3 +15,14 @@
 {"t": "outcome", "ts": "2026-09-21T04:52:52Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "git_commit_landed": true, "test_status": "pass", "source": "codex-stop", "client": "codex", "schema_version": 1}
 {"t": "prompt", "ts": "2026-09-21T04:55:25Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "client": "codex", "prompt_hash": "9923280f83", "schema_version": 1}
 {"t": "outcome", "ts": "2026-09-21T04:55:47Z", "session": "01a0c221-e686-7e52-9c2a-58de1cac04f5", "git_commit_landed": true, "test_status": "pass", "source": "codex-stop", "client": "codex", "schema_version": 1}
+{"t": "session", "ts": "2026-09-22T00:33:18Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "source": "startup", "git_head": "f6c876395fee59ea8738ad919e55dd2ccafbc67b", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-22T00:33:18Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "client": "codex", "prompt_hash": "b0e6b540fd", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-22T00:34:27Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-22T00:38:24Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "client": "codex", "prompt_hash": "d3d87ca024", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-22T00:41:03Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-22T00:42:11Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "client": "codex", "prompt_hash": "0ca6cffac5", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-22T00:42:49Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-22T00:45:28Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "client": "codex", "prompt_hash": "377486cde9", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-22T00:46:34Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}
+{"t": "prompt", "ts": "2026-09-22T00:56:24Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "client": "codex", "prompt_hash": "1ec6eb94f8", "schema_version": 1}
+{"t": "outcome", "ts": "2026-09-22T00:58:30Z", "session": "01a0c676-8d81-7033-b9c4-23723dd24c5e", "git_commit_landed": false, "test_status": "unknown", "source": "codex-stop", "client": "codex", "schema_version": 1}

@@ -246,16 +246,17 @@ def commit_state(
         peers_dir
     )
 
-    leaves = [
-        hash_peer_state(peer_dir)
+    from modules.commitment import ToyMerkleBackend
+    from modules.state_values import account_state_key, read_account_value
+
+    entries = [
+        (account_state_key(peer_dir.name), read_account_value(peer_dir))
         for peer_dir in peer_dirs
     ]
-
-    levels = build_merkle_levels(
-        leaves
-    )
-
-    root = levels[-1][0]
+    root = ToyMerkleBackend(reference_dir).commit(entries)
+    levels = build_merkle_levels([hash_peer_state(peer_dir) for peer_dir in peer_dirs])
+    if levels[-1][0] != root:
+        raise ValueError("Toy backend disagrees with legacy Merkle root")
 
     reference_dir.mkdir(
         parents=True,

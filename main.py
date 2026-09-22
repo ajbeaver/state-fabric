@@ -18,6 +18,8 @@ from modules.canonical_history import (
     object_at_height,
     object_at_root,
 )
+from modules.commitment import ToyMerkleBackend
+from modules.content_store import content_path
 from modules.merkle import commit_state, load_peer_dirs, load_state_root, verify_peer
 from modules.peers import initialize_peers, mutate_peer_state
 from modules.retention import (
@@ -29,6 +31,12 @@ from modules.retention import (
     repair_required,
 )
 from modules.storage import create_offer, get_object_id, reconstruct_offer, verify_state_package
+from modules.state_values import (
+    account_state_key,
+    load_state_value,
+    read_account_value,
+    state_value_id,
+)
 
 
 PEERS_DIR = Path("data/peers")
@@ -421,6 +429,7 @@ def run_experiment() -> None:
     print("  Retirement changed protection, not stored bytes")
     print("Happy-path lifecycle passed")
     run_failure_experiment()
+    run_witness_experiment()
     print("Full run passed")
 
 
@@ -547,6 +556,64 @@ def run_failure_experiment() -> None:
     print("  repair failed: below reconstruction threshold")
     print("  W remains 1/5; no new custody claim; Z remains safely protected")
     print("Transition failure checks passed")
+
+
+def run_witness_experiment() -> None:
+    print("\n=== Phase 2+ #15: regenerable witnesses ===")
+    active = load_peer_dirs()
+    alice, bob = active[:2]
+    backend = ToyMerkleBackend()
+    state_key = account_state_key(alice.name)
+    root_before = commit_state()
+    value_id = state_value_id(read_account_value(alice))
+    print(f"  Alice value ID before: {value_id}")
+    print(f"  Canonical root before: 0x{root_before.hex()}")
+
+    bob_nonce = bob / "cache" / "self" / "nonce"
+    mutate_peer_state(bob.name, nonce=int(bob_nonce.read_text(encoding="utf-8").strip()) + 1)
+    root_after = commit_state()
+    require(root_after != root_before, "Unrelated state mutation did not change the root")
+    require(state_value_id(read_account_value(alice)) == value_id,
+            "Unchanged Alice value bytes acquired a new value ID")
+    print(f"  Canonical root after Bob mutation: 0x{root_after.hex()}")
+    print(f"  Alice value ID after: {value_id}; value bytes unchanged: yes")
+
+    value = load_state_value(value_id)
+    witness = backend.build_witness(root_after, state_key, value)
+    del witness
+    cached_proofs = {
+        peer / "cache" / "self" / "proof.json":
+        (peer / "cache" / "self" / "proof.json").read_bytes()
+        for peer in active
+    }
+    try:
+        for path in cached_proofs:
+            path.unlink()
+        regenerated = backend.build_witness(root_after, state_key, value)
+    finally:
+        for path, proof_bytes in cached_proofs.items():
+            path.write_bytes(proof_bytes)
+    require(backend.verify_witness(state_key, value, regenerated, root_after),
+            "Regenerated witness failed")
+    require(not backend.verify_witness(state_key, value, regenerated, root_before),
+            "Wrong root accepted")
+    print("  Witness discarded; legacy proof caches temporarily deleted; regeneration verifies: yes")
+    print("  Wrong-root verification: rejected")
+
+    node_path = content_path(backend.nodes_dir, regenerated["siblings"][0]["hash"])
+    original = node_path.read_bytes()
+    try:
+        node_path.write_bytes(original + b"tampered")
+        try:
+            backend.build_witness(root_after, state_key, value)
+        except ValueError as error:
+            require("Content hash mismatch" in str(error), f"Unexpected node error: {error}")
+        else:
+            raise RuntimeError("Tampered authenticated node was accepted")
+    finally:
+        node_path.write_bytes(original)
+    print("  Tampered-node regeneration: rejected")
+    print("Regenerable witness checks passed")
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="State Fabric research simulator")

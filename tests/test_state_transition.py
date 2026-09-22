@@ -7,8 +7,6 @@ from modules.canonical_history import (
     object_at_height,
     object_at_root,
 )
-import pytest
-
 from modules.custody import (
     get_valid_active_fragments,
     reconstruct_from_network,
@@ -152,8 +150,6 @@ def test_historical_x_retires_only_after_recoverable_z_and_y_z_repair(network):
     expire_zero(x)
     assert object_health(x)[0] == 4
     assert not repair_required(x)
-    with pytest.raises(ValueError, match="not protected"):
-        repair_network(x, network.custodians[1], network.spare)
     assert (network.object_dir(network.custodians[0]) / "000.bin").is_file()
     assert verify_state_package(
         reconstruct_from_network(x, network.custodians[1]),

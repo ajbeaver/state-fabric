@@ -1389,11 +1389,6 @@ def repair_network(
     peers_dir: Path = DEFAULT_PEERS_DIR,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> dict:
-    from modules.retention import protection_for_object
-
-    if not protection_for_object(object_id, peers_dir).protected:
-        raise ValueError("Object is not protected by retention policy")
-
     object_dir, manifest, custody = (
         load_network_metadata(
             object_id,

@@ -349,12 +349,6 @@ def run_experiment() -> None:
     count_x, _, x_peer = object_health(object_x)
     require(count_x == 4, "X should have four valid active fragments")
     require(not repair_required(object_x), "Historical X has a repair obligation")
-    try:
-        repair_network(object_x, custodians[1], spare)
-    except ValueError as error:
-        require("not protected" in str(error), f"Unexpected X repair failure: {error}")
-    else:
-        raise RuntimeError("Historical X repair was incorrectly allowed")
     package_x = reconstruct_from_network(object_x, x_peer)
     show_package(package_x, object_x, canonical_height=height_n)
     print("  X active fragments: 4/5; mandatory repair: no")

@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 
 from eth_utils import keccak
+from modules.canonical_history import record_commit
 
 
 DEFAULT_PEERS_DIR = Path("data/peers")
@@ -284,6 +285,8 @@ def commit_state(
             peer_dir,
             proof,
         )
+
+    record_commit(root_hex, reference_dir)
 
     return root
 

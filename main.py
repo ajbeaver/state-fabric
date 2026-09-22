@@ -12,6 +12,12 @@ from modules.custody import (
     reconstruct_from_network,
     utc_now,
 )
+from modules.canonical_history import (
+    current_commit,
+    current_object,
+    object_at_height,
+    object_at_root,
+)
 from modules.merkle import commit_state, load_peer_dirs, load_state_root, verify_peer
 from modules.peers import initialize_peers, mutate_peer_state
 from modules.storage import create_offer, get_object_id, reconstruct_offer, verify_state_package
@@ -53,9 +59,9 @@ def show_fragments(custody: dict) -> None:
         print(f"  fragment {int(index):03d} -> {claim['custodian']} [{status}]")
 
 
-def show_package(package: bytes, object_id: str) -> None:
+def show_package(package: bytes, object_id: str, canonical_height: int | None = None) -> None:
     actual_id = get_object_id(package)
-    canonical = verify_state_package(package)
+    canonical = verify_state_package(package, canonical_height=canonical_height)
     require(actual_id == object_id and canonical, "Reconstructed package failed verification")
     print(f"  Reconstructed bytes: {len(package)}")
     print(f"  Reconstructed object ID: {actual_id}")
@@ -65,6 +71,10 @@ def show_package(package: bytes, object_id: str) -> None:
 def verify_current() -> None:
     peers = load_peer_dirs()
     root = load_state_root()
+    canonical = current_commit()
+    require(canonical["state_root"] == f"0x{root.hex()}",
+            "Trusted root and canonical history disagree")
+    print(f"Canonical height: {canonical['height']}")
     print(f"Trusted root: 0x{root.hex()}")
     for peer in peers:
         require(verify_peer(peer.name), f"Peer verification failed: {peer.name}")
@@ -92,6 +102,7 @@ def verify_current() -> None:
             if (object_dir / "manifest.json").is_file() and (object_dir / "custody.json").is_file():
                 network_objects.setdefault(object_dir.name, []).append(peer.name)
     for object_id, custodians in sorted(network_objects.items()):
+        # Pick a custody view for this fixed object ID; canonical history selects the version.
         custodian = max(
             custodians,
             key=lambda peer: len(active_claims(load_custody(peer, object_id))),
@@ -100,6 +111,8 @@ def verify_current() -> None:
         manifest = json.loads((object_dir / "manifest.json").read_text(encoding="utf-8"))
         if manifest["state_root"] != f"0x{root.hex()}":
             continue
+        require(current_object(manifest["address"]) == object_id,
+                f"Canonical object mapping disagrees: {object_id}")
         custody = load_custody(custodian, object_id)
         valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
         require(len(valid) >= manifest["encoding"]["required_fragments"],
@@ -108,18 +121,19 @@ def verify_current() -> None:
         require(get_object_id(package) == object_id and verify_state_package(package),
                 f"Distributed object failed verification: {object_id}")
         print(f"Distributed object {object_id}: {len(valid)}/{manifest['encoding']['total_fragments']} active fragments, canonical verification passed")
+        print(f"  Current by height {canonical['height']}: {object_id}")
         show_fragments(custody)
     current_network_objects = sum(
         json.loads((PEERS_DIR / custodians[0] / "data" / object_id / "manifest.json").read_text(encoding="utf-8"))["state_root"] == f"0x{root.hex()}"
         for object_id, custodians in network_objects.items()
     )
     print(f"Current distributed objects: {current_network_objects}")
-    print("  Objects from previous roots are retained but not historically verified")
+    print("  Historical objects are excluded from current health")
     print("Current state verification: passed")
 
 
 def run_experiment() -> None:
-    print("[1/15] Initializing peers", flush=True)
+    print("[1/16] Initializing peers", flush=True)
     require(initialize(7) == 7, "Expected seven peers")
     addresses = [path.name for path in load_peer_dirs()]
     publisher, custodians, spare = addresses[0], addresses[1:6], addresses[6]
@@ -127,103 +141,138 @@ def run_experiment() -> None:
         role = "publisher" if address == publisher else "spare" if address == spare else "custodian"
         print(f"  peer {index}: {address} ({role})")
 
-    print("[2/15] Committing state", flush=True)
+    print("[2/16] Committing Alice's original state", flush=True)
     root_n = commit_state()
-    print(f"Root N (Alice's original state): 0x{root_n.hex()}")
+    height_n = current_commit()["height"]
+    require(height_n == 0, "Initial canonical height must be zero")
+    print(f"  Height {height_n}; root N: 0x{root_n.hex()}")
     require(all(verify_peer(address) for address in addresses), "Initial peer proof failed")
     print(f"  Proofs verified: {len(addresses)}/{len(addresses)}")
 
-    print("[3/15] Creating Alice's original 2-of-5 object X", flush=True)
+    print("[3/16] Creating Alice object X", flush=True)
     offer_x = create_offer(publisher, encoding_type="erasure")
     object_x = offer_x["object_id"]
-    encoding = offer_x["encoding"]
-    require((encoding["required_fragments"], encoding["total_fragments"]) == (2, 5),
-            "Expected 2-of-5 encoding")
-    print(f"Object X: {object_x}")
-    print(f"  Publisher: {publisher}")
-    print(f"  Package size: {offer_x['original_size']} bytes")
-    print(f"  Encoding: {encoding['type']}, {encoding['required_fragments']}-of-{encoding['total_fragments']}")
     offers_dir = PEERS_DIR / publisher / "offers"
     old_dir = offers_dir / object_x
     require(old_dir.is_dir(), "Object X offer is missing")
-    print(f"  Offer X: {old_dir}")
+    require(offer_x["canonical_height"] == height_n, "X has wrong canonical height")
+    require(object_at_root(publisher, f"0x{root_n.hex()}") == object_x,
+            "Root N does not resolve to X")
+    print(f"  Publisher: {publisher}")
+    print(f"  Object X: {object_x}")
+    print(f"  Height: {offer_x['canonical_height']}; root: {offer_x['state_root']}")
+    print(f"  Encoding: {offer_x['encoding']['required_fragments']}-of-{offer_x['encoding']['total_fragments']}")
 
-    print("\n=== Controlled state transition: Alice before custody ===")
-    print("[4/15] Mutating Alice's local state", flush=True)
+    print("[4/16] Distributing X before mutation", flush=True)
+    for custodian in custodians:
+        result = request_custody(publisher, custodian, object_x)
+        print(f"  X fragment {result['fragment_index']:03d} ({result['fragment_size']} bytes) -> {custodian}")
+    custody_x = load_custody(custodians[0], object_x)
+    valid_x = get_valid_active_fragments(object_x, offer_x, custody_x, PEERS_DIR)
+    require(len(valid_x) == 5, "X does not have five valid active fragments")
+    require(all(load_custody(peer, object_x) == custody_x for peer in custodians),
+            "X custody views differ")
+    print("  X custody: 5/5 valid active fragments")
+
+    print("[5/16] Reconstructing and verifying X at root N", flush=True)
+    package_x = reconstruct_from_network(object_x, custodians[0])
+    show_package(package_x, object_x)
+    print(f"  Canonical height: {height_n}; trusted root: 0x{root_n.hex()}")
+    print("  X healthy before mutation: yes")
+
+    print("[6/16] Mutating Alice's local state", flush=True)
     nonce_path = PEERS_DIR / publisher / "cache" / "self" / "nonce"
     old_nonce = int(nonce_path.read_text(encoding="utf-8").strip())
     new_nonce = old_nonce + 1
     mutate_peer_state(publisher, nonce=new_nonce)
     require(int(nonce_path.read_text(encoding="utf-8").strip()) == new_nonce,
             "Nonce mutation was not stored")
-    print(f"  Alice: {publisher}")
-    print(f"  Nonce: {old_nonce} -> {new_nonce}")
+    print(f"  Alice nonce: {old_nonce} -> {new_nonce}")
 
-    print("[5/15] Committing Alice's mutated state", flush=True)
+    print("[7/16] Committing Alice's mutated state", flush=True)
     root_next = commit_state()
+    height_next = current_commit()["height"]
+    require(height_next == height_n + 1, "Canonical height did not advance")
     require(root_n != root_next, "Mutation did not change the canonical root")
-    print(f"  Root N+1 (Alice's mutated state): 0x{root_next.hex()}")
+    print(f"  Height {height_next}; root N+1: 0x{root_next.hex()}")
     print("  Root changed: yes")
 
-    print("[6/15] Creating current object Y", flush=True)
+    print("[8/16] Creating current Alice object Y", flush=True)
     manifest = create_offer(publisher, encoding_type="erasure")
     object_id = manifest["object_id"]
     new_dir = offers_dir / object_id
     require(object_x != object_id, "Mutation did not change the object ID")
     require(old_dir.is_dir() and new_dir.is_dir(), "Both offers must remain on disk")
+    require(manifest["canonical_height"] == height_next, "Y has wrong canonical height")
+    require(object_at_height(publisher, height_n) == object_x,
+            "Height zero no longer resolves to X")
+    require(object_at_root(publisher, f"0x{root_next.hex()}") == object_id,
+            "Root N+1 does not resolve to Y")
+    require(current_object(publisher) == object_id, "Current canonical object is not Y")
     print(f"  Object Y: {object_id}")
-    print(f"  Offer Y: {new_dir}")
-    print("  Object changed: yes")
-    print("  Previous object preserved: yes")
-
-    print("[7/15] Verifying Alice's new current state", flush=True)
-    package = reconstruct_offer(new_dir)
-    show_package(package, object_id)
-    require(verify_peer(publisher), "Mutated Alice proof failed verification")
+    print(f"  Height: {manifest['canonical_height']}; root: {manifest['state_root']}")
+    print("  X and Y are distinct: yes")
+    print("  Current by canonical height: Y")
+    require(verify_peer(publisher), "Alice's updated proof failed verification")
     print("  Alice's updated proof: passed")
-    print("State transition experiment passed")
 
-    print("\n=== Phase 1 custody lifecycle using object Y ===")
-
-    print("[8/15] Distributing current object Y fragments", flush=True)
-    print(f"  Distributing object Y: {object_id}")
+    print("[9/16] Distributing current object Y", flush=True)
     for custodian in custodians:
         result = request_custody(publisher, custodian, object_id)
-        print(f"  fragment {result['fragment_index']:03d} ({result['fragment_size']} bytes) -> {custodian}")
+        print(f"  Y fragment {result['fragment_index']:03d} ({result['fragment_size']} bytes) -> {custodian}")
     custody = load_custody(custodians[0], object_id)
-    require(len(active_claims(custody)) == 5, "Expected five active claims")
+    valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
+    require(len(valid) == 5, "Y does not have five valid active fragments")
     require(all(load_custody(peer, object_id) == custody for peer in custodians),
-            "Custody views differ")
-    print("Active fragments: 5/5; custody views agree")
+            "Y custody views differ")
+    print("  Y custody: 5/5 valid active fragments")
     show_fragments(custody)
 
-    print("[9/15] Reconstructing Y from distributed custody", flush=True)
+    print("[10/16] Reconstructing and verifying Y at root N+1", flush=True)
     package = reconstruct_from_network(object_id, custodians[0])
-    print(f"  Starting custodian: {custodians[0]}")
     show_package(package, object_id)
+    print(f"  Canonical height: {height_next}; trusted root: 0x{root_next.hex()}")
 
-    print("[10/15] Removing Alice and reconstructing Y", flush=True)
+    print("[11/16] Checking coexistence and canonical order", flush=True)
+    require(all((PEERS_DIR / peer / "data" / object_x).is_dir() and
+                (PEERS_DIR / peer / "data" / object_id).is_dir()
+                for peer in custodians), "X and Y are not separately stored on every custodian")
+    require(all(load_custody(peer, object_x) == custody_x for peer in custodians),
+            "Distributing Y changed X custody")
+    package_x = reconstruct_from_network(object_x, custodians[0],
+                                         canonical_height=height_n)
+    show_package(package_x, object_x, canonical_height=height_n)
+    require(current_object(publisher) == object_id and height_next > height_n,
+            "Canonical order does not select Y")
+    print("  X and Y custody directories: distinct on all five custodians")
+    print("  X still reconstructs against recorded height 0: yes")
+    print("  Y current because canonical height 1 > 0, independent of custody health")
+    print("Two-version distribution passed")
+
+    print("[12/16] Taking Alice offline and reconstructing Y", flush=True)
     removed_dir = Path("data/removed_peers") / publisher
     removed_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(PEERS_DIR / publisher), str(removed_dir))
     require(not (PEERS_DIR / publisher).exists(), "Alice remains in the active peer set")
-    print(f"  Alice removed from active peers; files retained at: {removed_dir}")
+    print(f"  Alice moved to: {removed_dir}")
     package = reconstruct_from_network(object_id, custodians[0])
     show_package(package, object_id)
-    print("Publisher-independent reconstruction: passed")
+    print("  Publisher-independent reconstruction: passed")
 
-    print("[11/15] Renewing custody", flush=True)
+    print("[13/16] Renewing Y custody", flush=True)
     before = custody["2"]["expires_at"]
     renewed = renew_custody(object_id, custodians[2])
     custody = load_custody(custodians[0], object_id)
     require(renewed["custodian"] == custodians[2]
             and parse_time(custody["2"]["expires_at"]) > parse_time(before),
-            "Custody renewal did not extend the lease")
-    print(f"Renewed: {custodians[2]}")
-    print(f"  Fragment: 002; previous expiry: {before}")
+            "Y custody renewal did not extend the lease")
+    require(all(load_custody(peer, object_x) == custody_x for peer in custodians),
+            "Y renewal changed X custody")
+    print(f"  Y fragment 002 renewed by: {custodians[2]}")
+    print(f"  Previous expiry: {before}")
     print(f"  New expiry: {custody['2']['expires_at']}")
 
-    print("[12/15] Expiring one fragment claim", flush=True)
+    print("[14/16] Expiring one Y fragment claim", flush=True)
     for path in PEERS_DIR.glob(f"*/data/{object_id}/custody.json"):
         view = json.loads(path.read_text(encoding="utf-8"))
         view["0"]["expires_at"] = EXPIRED_AT
@@ -231,39 +280,36 @@ def run_experiment() -> None:
     custody = load_custody(custodians[0], object_id)
     valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
     require(len(valid) == 4 and {item[0] for item in valid} == {1, 2, 3, 4},
-            "Expected only fragment zero to expire")
-    print("Active fragments: 4/5")
-    print(f"  Fragment 000 claim expiry set to {EXPIRED_AT} in replicated custody views")
+            "Expected only Y fragment zero to expire")
+    print("  Y active fragments: 4/5")
     show_fragments(custody)
 
-    print("[13/15] Repairing missing fragment", flush=True)
+    print("[15/16] Repairing Y fragment", flush=True)
     executor = min({lease["custodian"] for _, lease, _, _ in valid}, key=str.lower)
     result = repair_network(object_id, executor, spare)
     require(result["fragment_index"] == 0 and result["custodian"] == spare,
-            "Repair assigned the wrong fragment or custodian")
+            "Y repair assigned the wrong fragment or custodian")
     custody = load_custody(executor, object_id)
     valid = get_valid_active_fragments(object_id, manifest, custody, PEERS_DIR)
     require(len(valid) == 5 and len(active_claims(custody)) == 5,
-            "Repair did not restore five active fragments")
-    print(f"Executor: {executor}; replacement: {spare}")
-    print(f"  Regenerated fragment: {result['fragment_index']:03d}")
+            "Y repair did not restore five active fragments")
+    require(all(load_custody(peer, object_x) == custody_x for peer in custodians),
+            "Y repair changed X custody")
+    print(f"  Executor: {executor}; replacement: {spare}")
+    print(f"  Regenerated Y fragment: {result['fragment_index']:03d}")
     print(f"  Stored at: {result['destination']}")
-    print("Active fragments: 5/5")
+    print("  Y active fragments: 5/5")
     show_fragments(custody)
 
-    print("[14/15] Final reconstruction", flush=True)
+    print("[16/16] Final Y reconstruction", flush=True)
     package = reconstruct_from_network(object_id, executor)
-    print(f"  Starting custodian: {executor}")
     show_package(package, object_id)
-    print("[15/15] Confirming final Y and preserved X", flush=True)
-    require(get_object_id(package) == object_id, "Final reconstruction was not object Y")
-    require((removed_dir / "offers" / object_x).is_dir(), "Object X was lost")
-    require((removed_dir / "offers" / object_id).is_dir(), "Object Y was lost")
-    print(f"  Reconstructed object Y: {object_id}")
-    print(f"  Preserved object X: {removed_dir / 'offers' / object_x}")
-    print("  Publisher-independent custody lifecycle: passed")
+    require((removed_dir / "offers" / object_x).is_dir(), "X offer was lost")
+    require((removed_dir / "offers" / object_id).is_dir(), "Y offer was lost")
+    require(current_object(publisher) == object_id, "Current canonical object changed")
+    print(f"  Canonical current: height {height_next}, object Y {object_id}")
+    print("  X retained; Y repaired; X custody unchanged")
     print("Full run passed")
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="State Fabric research simulator")

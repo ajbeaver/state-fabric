@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from eth_utils import keccak, to_checksum_address
+from modules.canonical_history import commit_at_height, current_commit, register_object
 
 from modules.merkle import (
     find_peer_dir,
@@ -538,13 +539,16 @@ def erasure_decode_2_of_5(
 def verify_state_package(
     package: bytes,
     reference_dir: Path = DEFAULT_REFERENCE_DIR,
+    canonical_height: int | None = None,
 ) -> bool:
     parsed = parse_state_package(
         package
     )
 
-    trusted_root = load_state_root(
-        reference_dir
+    trusted_root = (
+        bytes.fromhex(commit_at_height(canonical_height, reference_dir)["state_root"][2:])
+        if canonical_height is not None
+        else load_state_root(reference_dir)
     )
 
     package_root = bytes.fromhex(
@@ -616,6 +620,10 @@ def create_offer(
     object_id = get_object_id(
         package
     )
+
+    canonical = current_commit(reference_dir)
+    if canonical["state_root"] != parsed["state_root"]:
+        raise ValueError("Offer root does not match current canonical commit")
 
     peer_dir = find_peer_dir(
         address,
@@ -741,6 +749,7 @@ def create_offer(
         "object_id": object_id,
         "address": parsed["address"],
         "state_root": parsed["state_root"],
+        "canonical_height": canonical["height"],
         "original_size": len(package),
         "hash_algorithm": "keccak256",
         "encoding": encoding,
@@ -759,6 +768,8 @@ def create_offer(
         + "\n",
         encoding="utf-8",
     )
+
+    register_object(peer_dir.name, parsed["state_root"], object_id, reference_dir)
 
     return manifest
 

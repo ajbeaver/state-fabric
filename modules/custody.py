@@ -906,6 +906,7 @@ def reconstruct_from_network(
     object_id: str,
     peer_address: str,
     peers_dir: Path = DEFAULT_PEERS_DIR,
+    canonical_height: int | None = None,
 ) -> bytes:
     peer_dir = find_peer_dir(
         peer_address,
@@ -1062,7 +1063,8 @@ def reconstruct_from_network(
         )
 
     if not verify_state_package(
-        package
+        package,
+        canonical_height=canonical_height,
     ):
         raise ValueError(
             "Reconstructed state failed "

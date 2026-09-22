@@ -82,8 +82,20 @@ def object_at_root(address: str, state_root: str,
     return object_at_height(address, commit["height"], reference_dir)
 
 
+def latest_object_at_or_before(address: str, height: int,
+                               reference_dir: Path = DEFAULT_REFERENCE_DIR) -> str:
+    """Resolve the latest registered per-address version at a canonical position."""
+    versions = canonical_source(reference_dir).versions(address)
+    eligible = [version for version in versions if version["sequence"] <= height]
+    if not eligible:
+        raise ValueError(f"No object for {address} at or before height {height}")
+    return eligible[-1]["object_id"]
+
+
 def current_object(address: str, reference_dir: Path = DEFAULT_REFERENCE_DIR) -> str:
-    return object_at_height(address, current_commit(reference_dir)["height"], reference_dir)
+    return latest_object_at_or_before(
+        address, current_commit(reference_dir)["height"], reference_dir,
+    )
 
 
 class SimulatorCanonicalSource:
